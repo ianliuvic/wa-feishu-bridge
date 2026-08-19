@@ -312,10 +312,20 @@ async def _handle_receive(payload: dict) -> None:
             image_key = content.get("image_key")
             if not image_key:
                 return
-            data, mimetype = feishu.download_resource(msg.get("message_id"), image_key, "image")
+            data, mimetype, _ = feishu.download_resource(msg.get("message_id"), image_key, "image")
             media_uri = f"data:{mimetype};base64,{base64.b64encode(data).decode('ascii')}"
             get_evolution().send_media(target.instance, target.phone, "image", media_uri)
             preview = "[图片]"
+        elif message_type == "file":
+            file_key = content.get("file_key")
+            if not file_key:
+                return
+            data, mimetype, file_name = feishu.download_resource(msg.get("message_id"), file_key, "file")
+            media_uri = f"data:{mimetype};base64,{base64.b64encode(data).decode('ascii')}"
+            get_evolution().send_media(
+                target.instance, target.phone, "document", media_uri, file_name=file_name
+            )
+            preview = f"[文件] {file_name}"
         else:
             logger.info("unsupported reply type=%s", message_type)
             return
