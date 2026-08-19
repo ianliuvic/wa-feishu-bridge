@@ -11,6 +11,8 @@
 import base64
 import json
 import logging
+import re
+from collections import deque
 
 import httpx
 from fastapi import FastAPI, Request
@@ -48,6 +50,28 @@ reply_map = ReplyMap()
 _llm: DeepSeekClient | None = None
 _evolution: EvolutionClient | None = None
 _autoreply: AutoReplyManager | None = None
+
+# Feishu delivers events at-least-once (and this URL is registered for both
+# 事件配置 and 回调配置), so dedupe by event_id and by reply message_id.
+_seen_event_ids: deque[str] = deque(maxlen=500)
+_seen_event_id_set: set[str] = set()
+_seen_msg_ids: deque[str] = deque(maxlen=500)
+_seen_msg_id_set: set[str] = set()
+
+
+def _seen(key: str, queue: deque, seen_set: set) -> bool:
+    if key in seen_set:
+        return True
+    if len(queue) >= queue.maxlen:
+        seen_set.discard(queue[0])  # about to be dropped by maxlen
+    seen_set.add(key)
+    queue.append(key)
+    return False
+
+
+def _strip_mention(text: str) -> str:
+    """Remove Feishu bot @mentions (e.g. '@_user_1 ') inserted when replying to a card."""
+    return re.sub(r"@\S+\s?", "", text).strip()
 
 
 def get_llm() -> DeepSeekClient | None:
@@ -222,6 +246,12 @@ async def feishu_event(request: Request):
 
     event_type = (payload.get("header") or {}).get("event_type")
 
+    # At-least-once delivery: skip duplicate events (first one already forwarded).
+    event_id = (payload.get("header") or {}).get("event_id", "")
+    if event_id and _seen(event_id, _seen_event_ids, _seen_event_id_set):
+        logger.info("duplicate feishu event_id=%s, skipping", event_id[:24])
+        return {"code": 0}
+
     # Proxy everything to the previous callback holder (mail-poller) unchanged.
     forward_resp: dict = {"code": 0}
     if FEISHU_EVENT_FORWARD_URL:
@@ -259,6 +289,12 @@ async def _handle_receive(payload: dict) -> None:
     if sender.get("sender_type") != "user":
         return
 
+    # Dedupe: the same reply may be delivered twice (dual channel / at-least-once).
+    msg_id = msg.get("message_id", "")
+    if msg_id and _seen(msg_id, _seen_msg_ids, _seen_msg_id_set):
+        logger.info("duplicate reply message_id=%s, skipping", msg_id[:24])
+        return
+
     target = reply_map.get(parent_id)
     if target is None:
         return
@@ -267,7 +303,7 @@ async def _handle_receive(payload: dict) -> None:
     try:
         content = json.loads(msg.get("content") or "{}")
         if message_type == "text":
-            text = (content.get("text") or "").strip()
+            text = _strip_mention(content.get("text") or "")
             if not text:
                 return
             get_evolution().send_text(target.instance, target.phone, text)
