@@ -12,20 +12,46 @@ import logging
 
 from fastapi import FastAPI, Request
 
-from .config import FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_CHAT_ID
+from .config import (
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
+    FEISHU_APP_ID,
+    FEISHU_APP_SECRET,
+    FEISHU_CHAT_ID,
+)
 from .evolution import EvolutionMessage
 from .feishu import FeishuClient
+from .llm import DeepSeekClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bridge")
 
-app = FastAPI(title="WA-Feishu Bridge", version="1.0.0")
+app = FastAPI(title="WA-Feishu Bridge", version="1.1.0")
 feishu = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+_llm: DeepSeekClient | None = None
+
+
+def get_llm() -> DeepSeekClient | None:
+    """Lazily build the DeepSeek client. Returns None when no API key is set."""
+    global _llm
+    if _llm is None and DEEPSEEK_API_KEY:
+        _llm = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL)
+    return _llm
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "chat_id": FEISHU_CHAT_ID}
+    return {
+        "status": "ok",
+        "chat_id": FEISHU_CHAT_ID,
+        "llm": {
+            "configured": bool(DEEPSEEK_API_KEY),
+            "base_url": DEEPSEEK_BASE_URL,
+            "model": DEEPSEEK_MODEL,
+        },
+    }
 
 
 @app.post("/webhook/evolution")
