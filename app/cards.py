@@ -13,7 +13,7 @@ def _ts() -> str:
 
 
 def _meta_markdown(evt: EvolutionMessage, note: str = "") -> str:
-    """Metadata block; keeps WA_NUMBER/INSTANCE lines for the Feishu->WA reply."""
+    """Metadata block for a forwarded WhatsApp message."""
     sender = evt.push_name or evt.sender_phone or "(未知)"
     lines = [
         f"**来自**：{sender}",
@@ -23,11 +23,6 @@ def _meta_markdown(evt: EvolutionMessage, note: str = "") -> str:
     ]
     if note:
         lines.append(note)
-    lines += [
-        "",
-        f"WA_NUMBER:{evt.sender_phone}",
-        f"INSTANCE:{evt.instance}",
-    ]
     return "\n".join(lines)
 
 
@@ -89,7 +84,7 @@ def placeholder_card(evt: EvolutionMessage, note: str) -> dict:
     return card
 
 
-def confirm_card(reply_preview: str) -> dict:
+def confirm_card(customer: str, reply_preview: str) -> dict:
     """Small confirmation card shown in the group after a Feishu -> WA reply."""
     return {
         "config": {"wide_screen_mode": True},
@@ -98,7 +93,7 @@ def confirm_card(reply_preview: str) -> dict:
             "title": {"tag": "plain_text", "content": "已回复客户"},
         },
         "elements": [
-            {"tag": "markdown", "content": f"✅ 已通过 WhatsApp 回复客户：\n\n{reply_preview}"},
+            {"tag": "markdown", "content": f"✅ 已通过 WhatsApp 回复客户 **{customer}**：\n\n{reply_preview}"},
         ],
     }
 
