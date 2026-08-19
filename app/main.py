@@ -155,7 +155,7 @@ def _send_and_map(card: dict, evt: EvolutionMessage) -> None:
     result = feishu.send_card(FEISHU_CHAT_ID, card)
     msg_id = (result.get("data") or {}).get("message_id")
     if msg_id:
-        reply_map.register(msg_id, evt.remote_jid, evt.sender_phone, evt.instance)
+        reply_map.register(msg_id, evt.remote_jid, evt.sender_phone, evt.instance, evt.push_name)
 
 
 def forward_to_feishu(evt: EvolutionMessage) -> None:
@@ -190,7 +190,7 @@ def forward_to_feishu(evt: EvolutionMessage) -> None:
                     result = feishu.send_file_message(FEISHU_CHAT_ID, file_key, file_name)
                     msg_id = (result.get("data") or {}).get("message_id")
                     if msg_id:
-                        reply_map.register(msg_id, evt.remote_jid, evt.sender_phone, evt.instance)
+                        reply_map.register(msg_id, evt.remote_jid, evt.sender_phone, evt.instance, evt.push_name)
                     _send_and_map(cards.placeholder_card(evt, f"[文件消息] {file_name}"), evt)
             return
         except Exception as exc:  # noqa: BLE001
@@ -330,7 +330,8 @@ async def _handle_receive(payload: dict) -> None:
     logger.info("replied to customer %s via %s", target.remote_jid, target.instance)
     if FEISHU_REPLY_CONFIRM:
         try:
-            feishu.send_card(FEISHU_CHAT_ID, cards.confirm_card(preview))
+            customer = f"{target.push_name}（{target.phone}）" if target.push_name else target.phone
+            feishu.send_card(FEISHU_CHAT_ID, cards.confirm_card(customer, preview))
         except Exception:  # noqa: BLE001
             logger.exception("confirm card failed")
 
