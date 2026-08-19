@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 
+import httpx
 from fastapi import FastAPI, Request
 
 from . import cards
@@ -27,6 +28,7 @@ from .config import (
     FEISHU_APP_ID,
     FEISHU_APP_SECRET,
     FEISHU_CHAT_ID,
+    FEISHU_EVENT_FORWARD_URL,
     FEISHU_EVENT_PATH,
     FEISHU_REPLY_CONFIRM,
 )
@@ -200,10 +202,13 @@ async def health():
 
 @app.post(FEISHU_EVENT_PATH)
 async def feishu_event(request: Request):
-    """Feishu event subscription callback: url verification + im.message.receive_v1.
+    """Feishu event subscription callback (single URL per app).
 
-    When a member replies to a forwarded card in the group, the reply is sent
-    back to the original WhatsApp customer (text or image).
+    - url_verification: answer the challenge (saving the callback in the console).
+    - Every other event is proxied to FEISHU_EVENT_FORWARD_URL so an existing
+      consumer (e.g. mail-poller's card.action.trigger) keeps working.
+    - im.message.receive_v1 is additionally handled locally: a reply to a
+      forwarded card is sent back to the original WhatsApp customer.
     """
     try:
         payload = await request.json()
@@ -216,25 +221,47 @@ async def feishu_event(request: Request):
         return {"challenge": payload.get("challenge", "")}
 
     event_type = (payload.get("header") or {}).get("event_type")
-    if event_type != "im.message.receive_v1":
-        logger.info("ignoring feishu event_type=%s", event_type)
-        return {"status": "ignored"}
 
+    # Proxy everything to the previous callback holder (mail-poller) unchanged.
+    forward_resp: dict = {"code": 0}
+    if FEISHU_EVENT_FORWARD_URL:
+        try:
+            fwd = httpx.post(FEISHU_EVENT_FORWARD_URL, json=payload, timeout=10)
+            if (
+                fwd.status_code < 400
+                and fwd.headers.get("content-type", "").startswith("application/json")
+            ):
+                forward_resp = fwd.json()
+            else:
+                logger.warning("feishu event forward returned HTTP %s", fwd.status_code)
+                forward_resp = {"code": 1}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("feishu event forward to %s failed: %s", FEISHU_EVENT_FORWARD_URL, exc)
+            forward_resp = {"code": 1}
+
+    if event_type == "im.message.receive_v1":
+        await _handle_receive(payload)
+
+    return forward_resp
+
+
+async def _handle_receive(payload: dict) -> None:
+    """Handle im.message.receive_v1: route a reply to a forwarded card to WhatsApp."""
     event = payload.get("event") or {}
     msg = event.get("message") or {}
     parent_id = msg.get("parent_id")
     chat_id = msg.get("chat_id")
     if chat_id != FEISHU_CHAT_ID:
-        return {"status": "ignored", "reason": "wrong chat"}
+        return
     if not parent_id:
-        return {"status": "ignored", "reason": "not a reply"}
+        return
     sender = event.get("sender") or {}
     if sender.get("sender_type") != "user":
-        return {"status": "ignored", "reason": "sender_type != user"}
+        return
 
     target = reply_map.get(parent_id)
     if target is None:
-        return {"status": "ignored", "reason": "unknown parent message"}
+        return
 
     message_type = msg.get("message_type")
     try:
@@ -242,27 +269,27 @@ async def feishu_event(request: Request):
         if message_type == "text":
             text = (content.get("text") or "").strip()
             if not text:
-                return {"status": "ignored", "reason": "empty text"}
+                return
             get_evolution().send_text(target.instance, target.phone, text)
             preview = text[:60]
         elif message_type == "image":
             image_key = content.get("image_key")
             if not image_key:
-                return {"status": "ignored", "reason": "no image_key"}
+                return
             data, mimetype = feishu.download_resource(msg.get("message_id"), image_key, "image")
             media_uri = f"data:{mimetype};base64,{base64.b64encode(data).decode('ascii')}"
             get_evolution().send_media(target.instance, target.phone, "image", media_uri)
             preview = "[图片]"
         else:
             logger.info("unsupported reply type=%s", message_type)
-            return {"status": "unsupported", "reason": message_type}
+            return
     except Exception as exc:  # noqa: BLE001
         logger.exception("feishu reply failed")
         try:
             feishu.send_card(FEISHU_CHAT_ID, cards.error_card(str(exc)[:120]))
         except Exception:  # noqa: BLE001
             pass
-        return {"status": "error", "reason": str(exc)}
+        return
 
     logger.info("replied to customer %s via %s", target.remote_jid, target.instance)
     if FEISHU_REPLY_CONFIRM:
@@ -270,7 +297,6 @@ async def feishu_event(request: Request):
             feishu.send_card(FEISHU_CHAT_ID, cards.confirm_card(preview))
         except Exception:  # noqa: BLE001
             logger.exception("confirm card failed")
-    return {"status": "ok"}
 
 
 @app.post("/webhook/evolution")
