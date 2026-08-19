@@ -41,8 +41,11 @@ class FeishuClient:
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
         resp = httpx.post(url, json=body, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise
         if data.get("code") != 0:
             raise RuntimeError(
                 f"Feishu send error: code={data.get('code')} msg={data.get('msg')}"
