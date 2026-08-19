@@ -126,3 +126,17 @@ class FeishuClient:
         if data.get("code") != 0:
             raise RuntimeError(f"Feishu {what} error: code={data.get('code')} msg={data.get('msg')}")
         return data
+
+    def download_resource(self, message_id: str, file_key: str, res_type: str = "image") -> tuple[bytes, str]:
+        """Download an image/file resource attached to a message. Returns (bytes, mimetype)."""
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={res_type}"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = httpx.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Feishu resource download failed: status={resp.status_code} body={resp.text[:300]}"
+            )
+        mimetype = resp.headers.get("content-type", "application/octet-stream")
+        logger.info("downloaded feishu resource msg=%s key=%s (%d bytes)", message_id[:24], file_key[:20], len(resp.content))
+        return resp.content, mimetype
