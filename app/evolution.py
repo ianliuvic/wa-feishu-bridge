@@ -63,25 +63,56 @@ class EvolutionMessage:
         """True for group (@g.us) or broadcast (@broadcast) messages."""
         return self.remote_jid.endswith("@g.us") or self.remote_jid.endswith("@broadcast")
 
+    @property
+    def media_type(self) -> str:
+        """Media kind: image | document | audio | video | sticker | none."""
+        for kind in ("imageMessage", "documentMessage", "audioMessage", "videoMessage", "stickerMessage"):
+            if kind in self.message:
+                return kind.replace("Message", "").lower()
+        return "none"
+
+    @property
+    def media_note(self) -> str:
+        return {
+            "image": "[图片消息]",
+            "document": "[文件消息]",
+            "audio": "[语音消息]",
+            "video": "[视频消息]",
+            "sticker": "[表情消息]",
+        }.get(self.media_type, "[非文字消息]")
+
 
 class EvolutionClient:
-    """Minimal Evolution API client (sendText)."""
+    """Minimal Evolution API client (sendText + media download)."""
 
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
 
-    def send_text(self, instance: str, number: str, text: str) -> dict:
-        url = f"{self.base_url}/message/sendText/{quote(instance, safe='')}"
+    def _post(self, path: str, body: dict) -> dict:
+        url = f"{self.base_url}{path}"
         headers = {"apikey": self.api_key, "Content-Type": "application/json"}
-        body = {"number": number, "text": text}
-        resp = httpx.post(url, json=body, headers=headers, timeout=30)
+        resp = httpx.post(url, json=body, headers=headers, timeout=120)
         try:
             data = resp.json()
         except ValueError:
             resp.raise_for_status()
             raise
-        if resp.status_code >= 400 or data.get("status") == 400:
-            raise RuntimeError(f"Evolution send error: status={resp.status_code} body={data}")
+        if resp.status_code >= 400 or (isinstance(data, dict) and data.get("status") == 400):
+            raise RuntimeError(f"Evolution error: status={resp.status_code} body={data}")
+        return data
+
+    def send_text(self, instance: str, number: str, text: str) -> dict:
+        data = self._post(f"/message/sendText/{quote(instance, safe='')}", {"number": number, "text": text})
         logger.info("sent WhatsApp reply to %s via instance %s", number, instance)
         return data
+
+    def get_media_base64(self, instance: str, message_obj: dict) -> dict:
+        """Download a media message as base64. message_obj = the full webhook data object
+        (key + message + messageType + ...), as required by Evolution's
+        /chat/getBase64FromMediaMessage."""
+        data = self._post(
+            f"/chat/getBase64FromMediaMessage/{quote(instance, safe='')}",
+            {"message": message_obj},
+        )
+        return data  # e.g. {"base64": "...", "mimetype": "image/jpeg", "length": 123, "fileName": "..."}
