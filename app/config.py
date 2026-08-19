@@ -31,3 +31,14 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 AUTO_REPLY_START_HOUR = int(os.getenv("AUTO_REPLY_START_HOUR", "0"))
 AUTO_REPLY_END_HOUR = int(os.getenv("AUTO_REPLY_END_HOUR", "8"))
+
+# Feishu card styling (header template/color, title, footer hint).
+FEISHU_CARD_TEMPLATE = os.getenv("FEISHU_CARD_TEMPLATE", "blue")
+FEISHU_CARD_TITLE = os.getenv("FEISHU_CARD_TITLE", "WhatsApp 新消息")
+FEISHU_CARD_FOOTER = os.getenv("FEISHU_CARD_FOOTER", "💬 回复此消息可回复客户")
+
+# Feishu -> WhatsApp reply feature: confirm card after replying.
+FEISHU_REPLY_CONFIRM = os.getenv("FEISHU_REPLY_CONFIRM", "true").lower() in ("1", "true", "yes", "on")
+
+# Feishu event subscription (im.message.receive_v1) callback path.
+FEISHU_EVENT_PATH = os.getenv("FEISHU_EVENT_PATH", "/webhook/feishu")
