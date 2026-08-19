@@ -13,24 +13,31 @@ import logging
 from fastapi import FastAPI, Request
 
 from .config import (
+    AUTO_REPLY_ENABLED,
+    AUTO_REPLY_END_HOUR,
+    AUTO_REPLY_START_HOUR,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    EVOLUTION_API_KEY,
+    EVOLUTION_BASE_URL,
     FEISHU_APP_ID,
     FEISHU_APP_SECRET,
     FEISHU_CHAT_ID,
 )
-from .evolution import EvolutionMessage
+from .autoreply import AutoReplyManager
+from .evolution import EvolutionClient, EvolutionMessage
 from .feishu import FeishuClient
 from .llm import DeepSeekClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bridge")
 
-app = FastAPI(title="WA-Feishu Bridge", version="1.1.0")
+app = FastAPI(title="WA-Feishu Bridge", version="1.2.0")
 feishu = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
 
 _llm: DeepSeekClient | None = None
+_autoreply: AutoReplyManager | None = None
 
 
 def get_llm() -> DeepSeekClient | None:
@@ -39,6 +46,25 @@ def get_llm() -> DeepSeekClient | None:
     if _llm is None and DEEPSEEK_API_KEY:
         _llm = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL)
     return _llm
+
+
+def get_autoreply() -> AutoReplyManager | None:
+    """Lazily build the auto-reply manager when all prerequisites are present."""
+    global _autoreply
+    if _autoreply is None and AUTO_REPLY_ENABLED and DEEPSEEK_API_KEY and EVOLUTION_BASE_URL and EVOLUTION_API_KEY:
+        _autoreply = AutoReplyManager(
+            llm=get_llm(),
+            evolution=EvolutionClient(EVOLUTION_BASE_URL, EVOLUTION_API_KEY),
+            start_hour=AUTO_REPLY_START_HOUR,
+            end_hour=AUTO_REPLY_END_HOUR,
+        )
+        logger.info(
+            "auto-reply enabled: %02d:00-%02d:00 Asia/Shanghai, model=%s",
+            AUTO_REPLY_START_HOUR,
+            AUTO_REPLY_END_HOUR,
+            DEEPSEEK_MODEL,
+        )
+    return _autoreply
 
 
 @app.get("/health")
@@ -50,6 +76,10 @@ async def health():
             "configured": bool(DEEPSEEK_API_KEY),
             "base_url": DEEPSEEK_BASE_URL,
             "model": DEEPSEEK_MODEL,
+        },
+        "auto_reply": {
+            "enabled": get_autoreply() is not None,
+            "window": f"{AUTO_REPLY_START_HOUR:02d}:00-{AUTO_REPLY_END_HOUR:02d}:00 Asia/Shanghai",
         },
     }
 
@@ -82,4 +112,16 @@ async def evolution_webhook(request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.exception("feishu send failed")
         return {"status": "error", "reason": str(exc)}
+
+    # Off-hours auto-reply (once per customer per window). Independent of the
+    # Feishu forwarding above; failures are logged, never block the webhook.
+    manager = get_autoreply()
+    if manager is not None:
+        try:
+            reply = manager.maybe_reply(evt)
+            if reply:
+                logger.info("auto-reply sent: %s", reply[:80])
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-reply failed")
+
     return {"status": "ok"}
