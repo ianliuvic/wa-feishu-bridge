@@ -42,3 +42,8 @@ FEISHU_REPLY_CONFIRM = os.getenv("FEISHU_REPLY_CONFIRM", "true").lower() in ("1"
 
 # Feishu event subscription (im.message.receive_v1) callback path.
 FEISHU_EVENT_PATH = os.getenv("FEISHU_EVENT_PATH", "/webhook/feishu")
+
+# Forward all other Feishu events (e.g. card.action.trigger) to this URL so an
+# existing consumer keeps working. Feishu allows only ONE callback per app, so
+# this bridge acts as the single entry and proxies the rest.
+FEISHU_EVENT_FORWARD_URL = os.getenv("FEISHU_EVENT_FORWARD_URL", "")
