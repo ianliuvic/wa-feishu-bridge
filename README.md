@@ -33,6 +33,39 @@ WhatsApp  →  Evolution API (webhook MESSAGES_UPSERT)  →  this service  →  
 | `AUTO_REPLY_ENABLED` | no | Default `true`. Off-hours auto-reply on/off |
 | `AUTO_REPLY_START_HOUR` / `AUTO_REPLY_END_HOUR` | no | Off-hours window (Asia/Shanghai), default `0` / `8` |
 
+## Feishu -> WhatsApp reply
+
+Members in the Feishu group can **reply to a forwarded card** to answer the
+original WhatsApp customer (text and image replies supported):
+
+```
+Feishu group member replies to a card
+  -> Feishu event subscription (im.message.receive_v1) -> /webhook/feishu
+  -> reply_map: message_id -> (customer jid, number, instance)
+  -> text  reply: Evolution sendText
+  -> image reply: download Feishu image -> Evolution sendMedia (data URI)
+  -> green "已回复客户" confirmation card in the group
+```
+
+Config:
+| Variable | Default | Description |
+|---|---|---|
+| `FEISHU_CARD_TEMPLATE` | `blue` | Card header template/color |
+| `FEISHU_CARD_TITLE` | `WhatsApp 新消息` | Card header title |
+| `FEISHU_CARD_FOOTER` | `💬 回复此消息可回复客户` | Footer hint on cards (empty = off) |
+| `FEISHU_REPLY_CONFIRM` | `true` | Send confirmation card after replying |
+| `FEISHU_EVENT_PATH` | `/webhook/feishu` | Feishu event callback path |
+
+### Feishu admin console setup (one-time)
+
+1. Permissions: grant `im:message:readonly` (and `im:resource` if not yet) to the app.
+2. Event subscriptions: request URL = `https://wa-bridge.yiswim.cloud/webhook/feishu`,
+   subscribe to event **Receive messages `im.message.receive_v1`**. Do NOT enable
+   payload encryption (not supported yet).
+3. Version management: create & publish a new app version.
+
+The reply_map is in-memory (48h TTL, 5000 entries) — it resets on restart.
+
 ## Off-hours auto-reply
 
 Between `00:00` and `08:00` Asia/Shanghai, when a customer sends a WhatsApp
