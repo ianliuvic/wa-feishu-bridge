@@ -81,6 +81,26 @@ IMAGE_MAX_BYTES = 9 * 1024 * 1024      # Feishu image upload limit is 10MB
 DOC_MAX_BYTES = 28 * 1024 * 1024       # Feishu file upload limit is 30MB
 
 
+def _media_size(media: dict) -> int:
+    """Numeric size in bytes from Evolution's media response.
+
+    For documents 'size' is an int; for images it is a dict holding
+    fileLength (uint32 low/high) plus width/height metadata.
+    """
+    size = media.get("size")
+    if isinstance(size, int):
+        return size
+    if isinstance(size, dict):
+        fl = size.get("fileLength")
+        if isinstance(fl, dict):
+            low = fl.get("low") or 0
+            high = fl.get("high") or 0
+            return low + (int(high) << 32)
+        if isinstance(fl, int):
+            return fl
+    return 0
+
+
 def _decode_base64(media: dict) -> tuple[bytes, str, str]:
     """Return (bytes, mimetype, filename) from Evolution's media response."""
     raw = media.get("base64") or ""
@@ -106,7 +126,7 @@ def forward_to_feishu(evt: EvolutionMessage) -> None:
     if kind in ("image", "document") and evolution is not None:
         try:
             media = evolution.get_media_base64(evt.instance, evt.payload.get("data") or {})
-            size = media.get("size") or 0
+            size = _media_size(media)
             limit = IMAGE_MAX_BYTES if kind == "image" else DOC_MAX_BYTES
             if size and size > limit:
                 logger.warning("%s too large (%s), sending placeholder", kind, _fmt_size(size))
