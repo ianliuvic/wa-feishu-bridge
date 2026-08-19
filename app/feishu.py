@@ -40,6 +40,31 @@ class FeishuClient:
             "msg_type": "text",
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
+        return self._send(url, headers, body)
+
+    def send_card(self, chat_id: str, card: dict) -> dict:
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        return self._send(url, headers, body)
+
+    def send_file_message(self, chat_id: str, file_key: str, file_name: str) -> dict:
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {
+            "receive_id": chat_id,
+            "msg_type": "file",
+            "content": json.dumps({"file_key": file_key, "file_name": file_name}, ensure_ascii=False),
+        }
+        return self._send(url, headers, body)
+
+    def _send(self, url: str, headers: dict, body: dict) -> dict:
         resp = httpx.post(url, json=body, headers=headers, timeout=15)
         try:
             data = resp.json()
@@ -50,5 +75,54 @@ class FeishuClient:
             raise RuntimeError(
                 f"Feishu send error: code={data.get('code')} msg={data.get('msg')}"
             )
-        logger.info("sent text message to chat %s (msg_id=%s)", chat_id, (data.get("data") or {}).get("message_id"))
+        logger.info("sent message to chat %s (msg_id=%s)", body.get("receive_id"), (data.get("data") or {}).get("message_id"))
+        return data
+
+    def upload_image(self, data: bytes, mimetype: str) -> str:
+        """Upload an image and return its image_key."""
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/images"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = httpx.post(
+            url,
+            headers=headers,
+            data={"image_type": "message"},
+            files={"image": ("image", data, mimetype)},
+            timeout=60,
+        )
+        payload = self._check(resp, "upload image")
+        image_key = (payload.get("data") or {}).get("image_key")
+        if not image_key:
+            raise RuntimeError(f"Feishu image upload: no image_key in {payload}")
+        logger.info("uploaded image, key=%s", image_key[:24])
+        return image_key
+
+    def upload_file(self, data: bytes, file_name: str, mimetype: str) -> str:
+        """Upload a file and return its file_key."""
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/files"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = httpx.post(
+            url,
+            headers=headers,
+            data={"file_type": "stream", "file_name": file_name},
+            files={"file": (file_name, data, mimetype)},
+            timeout=60,
+        )
+        payload = self._check(resp, "upload file")
+        file_key = (payload.get("data") or {}).get("file_key")
+        if not file_key:
+            raise RuntimeError(f"Feishu file upload: no file_key in {payload}")
+        logger.info("uploaded file %s, key=%s", file_name, file_key[:24])
+        return file_key
+
+    @staticmethod
+    def _check(resp, what: str) -> dict:
+        try:
+            data = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise
+        if data.get("code") != 0:
+            raise RuntimeError(f"Feishu {what} error: code={data.get('code')} msg={data.get('msg')}")
         return data
