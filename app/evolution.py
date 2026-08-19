@@ -107,6 +107,26 @@ class EvolutionClient:
         logger.info("sent WhatsApp reply to %s via instance %s", number, instance)
         return data
 
+    def send_media(
+        self,
+        instance: str,
+        number: str,
+        mediatype: str,
+        media: str,
+        caption: str | None = None,
+        file_name: str | None = None,
+    ) -> dict:
+        """Send media (image/document/audio/video). `media` is a URL or a data URI
+        (e.g. data:image/jpeg;base64,...). fileName is required for base64 documents."""
+        body = {"number": number, "mediatype": mediatype, "media": media}
+        if caption:
+            body["caption"] = caption
+        if file_name:
+            body["fileName"] = file_name
+        data = self._post(f"/message/sendMedia/{quote(instance, safe='')}", body)
+        logger.info("sent WhatsApp %s to %s via instance %s", mediatype, number, instance)
+        return data
+
     def get_media_base64(self, instance: str, message_obj: dict) -> dict:
         """Download a media message as base64. message_obj = the full webhook data object
         (key + message + messageType + ...), as required by Evolution's
