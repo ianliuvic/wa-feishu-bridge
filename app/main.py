@@ -125,8 +125,10 @@ def forward_to_feishu(evt: EvolutionMessage) -> None:
                     feishu.send_card(FEISHU_CHAT_ID, cards.file_card(evt, file_key, file_name))
                 except RuntimeError as exc:
                     # file element rejected -> fall back to a plain file message
+                    # plus a metadata card (sender/number/instance/time)
                     logger.warning("file card rejected (%s), sending file message instead", exc)
                     feishu.send_file_message(FEISHU_CHAT_ID, file_key, file_name)
+                    feishu.send_card(FEISHU_CHAT_ID, cards.placeholder_card(evt, f"[文件消息] {file_name}"))
             return
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s forward failed (%s), falling back to placeholder", kind, exc)
