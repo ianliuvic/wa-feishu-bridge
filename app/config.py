@@ -19,3 +19,9 @@ FEISHU_CHAT_ID = _require("FEISHU_CHAT_ID")
 # (e.g. LLM auto-reply). Not used by the forward-only bridge yet.
 EVOLUTION_BASE_URL = os.getenv("EVOLUTION_BASE_URL", "")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
+
+# Optional: DeepSeek (OpenAI-compatible) LLM capability. Not used by the
+# forwarding flow yet; available for summarization / auto-reply features.
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
