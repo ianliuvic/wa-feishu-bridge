@@ -27,6 +27,9 @@ WhatsApp  →  Evolution API (webhook MESSAGES_UPSERT)  →  this service  →  
 | `FEISHU_API_BASE` | no | Default `https://open.feishu.cn` |
 | `EVOLUTION_BASE_URL` | no | Reserved for future LLM auto-reply |
 | `EVOLUTION_API_KEY` | no | Reserved for future LLM auto-reply |
+| `DEEPSEEK_API_KEY` | no | DeepSeek API key (OpenAI-compatible). Capability only — not used by the forwarding flow yet |
+| `DEEPSEEK_BASE_URL` | no | Default `https://api.deepseek.com` |
+| `DEEPSEEK_MODEL` | no | Default `deepseek-v4-flash` |
 
 ## Deploy
 
