@@ -2,11 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 
+from .config import FEISHU_CARD_FOOTER, FEISHU_CARD_TEMPLATE, FEISHU_CARD_TITLE
 from .evolution import EvolutionMessage
 
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-
-HEADER = "WhatsApp 新消息"
 
 
 def _ts() -> str:
@@ -14,7 +13,7 @@ def _ts() -> str:
 
 
 def _meta_markdown(evt: EvolutionMessage, note: str = "") -> str:
-    """Metadata block; keeps WA_NUMBER/INSTANCE lines for future Feishu->WA replies."""
+    """Metadata block; keeps WA_NUMBER/INSTANCE lines for the Feishu->WA reply."""
     sender = evt.push_name or evt.sender_phone or "(未知)"
     lines = [
         f"**来自**：{sender}",
@@ -33,53 +32,85 @@ def _meta_markdown(evt: EvolutionMessage, note: str = "") -> str:
 
 
 def _base_card() -> dict:
-    return {
+    card = {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "blue",
-            "title": {"tag": "plain_text", "content": HEADER},
+            "template": FEISHU_CARD_TEMPLATE,
+            "title": {"tag": "plain_text", "content": FEISHU_CARD_TITLE},
         },
         "elements": [],
     }
+    if FEISHU_CARD_FOOTER:
+        card["elements"].append(
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": FEISHU_CARD_FOOTER}]}
+        )
+    return card
 
 
 def text_card(evt: EvolutionMessage) -> dict:
     card = _base_card()
-    card["elements"] = [
-        {"tag": "markdown", "content": _meta_markdown(evt) + "\n\n" + evt.text},
-    ]
+    card["elements"].insert(0, {"tag": "markdown", "content": _meta_markdown(evt) + "\n\n" + evt.text})
     return card
 
 
 def image_card(evt: EvolutionMessage, img_key: str) -> dict:
     card = _base_card()
-    card["elements"] = [
+    card["elements"].insert(
+        0,
         {
             "tag": "img",
             "img_key": img_key,
             "alt": {"tag": "plain_text", "content": "WhatsApp 图片"},
         },
-        {"tag": "markdown", "content": _meta_markdown(evt, note="**[图片消息]**")},
-    ]
+    )
+    card["elements"].insert(1, {"tag": "markdown", "content": _meta_markdown(evt, note="**[图片消息]**")})
     return card
 
 
 def file_card(evt: EvolutionMessage, file_key: str, file_name: str) -> dict:
     card = _base_card()
-    card["elements"] = [
+    card["elements"].insert(
+        0,
         {
             "tag": "file",
             "file_key": file_key,
             "name": file_name,
         },
-        {"tag": "markdown", "content": _meta_markdown(evt, note=f"**[文件消息]** {file_name}")},
-    ]
+    )
+    card["elements"].insert(
+        1, {"tag": "markdown", "content": _meta_markdown(evt, note=f"**[文件消息]** {file_name}")}
+    )
     return card
 
 
 def placeholder_card(evt: EvolutionMessage, note: str) -> dict:
     card = _base_card()
-    card["elements"] = [
-        {"tag": "markdown", "content": _meta_markdown(evt, note=note)},
-    ]
+    card["elements"].insert(0, {"tag": "markdown", "content": _meta_markdown(evt, note=note)})
     return card
+
+
+def confirm_card(reply_preview: str) -> dict:
+    """Small confirmation card shown in the group after a Feishu -> WA reply."""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"tag": "plain_text", "content": "已回复客户"},
+        },
+        "elements": [
+            {"tag": "markdown", "content": f"✅ 已通过 WhatsApp 回复客户：\n\n{reply_preview}"},
+        ],
+    }
+
+
+def error_card(reason: str) -> dict:
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "red",
+            "title": {"tag": "plain_text", "content": "回复失败"},
+        },
+        "elements": [
+            {"tag": "markdown", "content": f"❌ 回复未能发送：`{reason}`"},
+        ],
+    }
