@@ -19,6 +19,7 @@ class ReplyTarget:
     phone: str
     instance: str
     ts: float
+    push_name: str = ""
 
 
 class ReplyMap:
@@ -27,11 +28,11 @@ class ReplyMap:
         self._max = max_entries
         self._map: dict[str, ReplyTarget] = {}
 
-    def register(self, message_id: str, remote_jid: str, phone: str, instance: str):
+    def register(self, message_id: str, remote_jid: str, phone: str, instance: str, push_name: str = ""):
         if not message_id:
             return
         self._prune()
-        self._map[message_id] = ReplyTarget(remote_jid, phone, instance, time.time())
+        self._map[message_id] = ReplyTarget(remote_jid, phone, instance, time.time(), push_name)
         logger.info("registered reply target: msg=%s jid=%s", message_id[:24], remote_jid)
 
     def get(self, message_id: str) -> ReplyTarget | None:
