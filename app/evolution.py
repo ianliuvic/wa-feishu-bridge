@@ -1,6 +1,12 @@
-"""Parsing and formatting of Evolution API webhook payloads."""
+"""Parsing of Evolution API webhook payloads + a small Evolution REST client."""
 
+import logging
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
+import httpx
+
+logger = logging.getLogger("bridge.evolution")
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -51,3 +57,31 @@ class EvolutionMessage:
             f"消息内容为：\n{self.text}\n\n"
             f"WA_NUMBER:{self.sender_phone}\nINSTANCE:{self.instance}"
         )
+
+    @property
+    def is_group(self) -> bool:
+        """True for group (@g.us) or broadcast (@broadcast) messages."""
+        return self.remote_jid.endswith("@g.us") or self.remote_jid.endswith("@broadcast")
+
+
+class EvolutionClient:
+    """Minimal Evolution API client (sendText)."""
+
+    def __init__(self, base_url: str, api_key: str):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    def send_text(self, instance: str, number: str, text: str) -> dict:
+        url = f"{self.base_url}/message/sendText/{quote(instance, safe='')}"
+        headers = {"apikey": self.api_key, "Content-Type": "application/json"}
+        body = {"number": number, "text": text}
+        resp = httpx.post(url, json=body, headers=headers, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise
+        if resp.status_code >= 400 or data.get("status") == 400:
+            raise RuntimeError(f"Evolution send error: status={resp.status_code} body={data}")
+        logger.info("sent WhatsApp reply to %s via instance %s", number, instance)
+        return data
