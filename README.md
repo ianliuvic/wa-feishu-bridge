@@ -12,9 +12,11 @@ WhatsApp  →  Evolution API (webhook MESSAGES_UPSERT)  →  this service  →  
   - Ignores events other than `messages.upsert`.
   - Drops own messages (`data.key.fromMe == true`).
   - Extracts `pushName`, `remoteJid`, message text (conversation / extendedTextMessage),
-    instance name; formats a readable notice and sends it to the configured Feishu chat.
-  - Keeps `WA_NUMBER:` / `INSTANCE:` lines in the message so a future
-    Feishu → WhatsApp reply handler can parse them.
+    instance name; forwards as a styled interactive card (text / image / document).
+  - Every sent card is registered in an in-memory map `message_id -> customer`,
+    which powers the Feishu -> WhatsApp reply feature.
+- `POST /webhook/feishu` — Feishu event subscription callback (url_verification,
+  `im.message.receive_v1` reply routing, proxies other events to mail-poller).
 - `GET /health` — liveness check.
 
 ## Env vars
