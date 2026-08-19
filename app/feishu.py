@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 import time
+from urllib.parse import unquote
 
 import httpx
 
@@ -127,16 +129,54 @@ class FeishuClient:
             raise RuntimeError(f"Feishu {what} error: code={data.get('code')} msg={data.get('msg')}")
         return data
 
-    def download_resource(self, message_id: str, file_key: str, res_type: str = "image") -> tuple[bytes, str]:
-        """Download an image/file resource attached to a message. Returns (bytes, mimetype)."""
+    def download_resource(self, message_id: str, file_key: str, res_type: str = "image") -> tuple[bytes, str, str]:
+        """Download an image/file resource attached to a message.
+
+        Returns (bytes, mimetype, filename). Filename is parsed from the
+        Content-Disposition header when present, else derived from the mimetype.
+        """
         token = self._get_token()
         url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={res_type}"
         headers = {"Authorization": f"Bearer {token}"}
-        resp = httpx.get(url, headers=headers, timeout=60)
+        resp = httpx.get(url, headers=headers, timeout=120)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Feishu resource download failed: status={resp.status_code} body={resp.text[:300]}"
             )
         mimetype = resp.headers.get("content-type", "application/octet-stream")
-        logger.info("downloaded feishu resource msg=%s key=%s (%d bytes)", message_id[:24], file_key[:20], len(resp.content))
-        return resp.content, mimetype
+        file_name = self._filename_from_disposition(
+            resp.headers.get("content-disposition", ""), mimetype
+        )
+        logger.info(
+            "downloaded feishu resource msg=%s key=%s (%d bytes, %s)",
+            message_id[:24], file_key[:20], len(resp.content), file_name,
+        )
+        return resp.content, mimetype, file_name
+
+    @staticmethod
+    def _filename_from_disposition(disposition: str, mimetype: str) -> str:
+        if not disposition:
+            return FeishuClient._default_filename(mimetype)
+        m = re.search(r"filename\*=UTF-8''([^;]+)", disposition, re.IGNORECASE) or re.search(
+            r'filename="?([^";]+)"?', disposition, re.IGNORECASE
+        )
+        if m:
+            name = unquote(m.group(1)).strip()
+            if name:
+                return name
+        return FeishuClient._default_filename(mimetype)
+
+    @staticmethod
+    def _default_filename(mimetype: str) -> str:
+        ext_map = {
+            "image/jpeg": "image.jpg",
+            "image/png": "image.png",
+            "image/gif": "image.gif",
+            "image/webp": "image.webp",
+            "application/pdf": "document.pdf",
+            "text/plain": "file.txt",
+            "application/msword": "document.doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document.docx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "sheet.xlsx",
+        }
+        return ext_map.get(mimetype, "file.bin")
