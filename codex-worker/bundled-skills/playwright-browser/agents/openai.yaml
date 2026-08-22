@@ -1,0 +1,4 @@
+interface:
+  display_name: "Playwright Browser"
+  short_description: "Open, inspect, click, fill, and screenshot websites"
+  default_prompt: "Use $playwright-browser to open a website, inspect it visually, interact with it, and save screenshots."
