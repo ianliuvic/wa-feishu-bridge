@@ -16,7 +16,9 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import deque
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -24,7 +26,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import cards
+from .attachments import PendingAttachment, PendingAttachmentStore
 from .config import (
+    ATTACHMENT_DIR,
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_MAX_FILES,
+    ATTACHMENT_TTL_SECONDS,
     AUTO_REPLY_ENABLED,
     AUTO_REPLY_END_HOUR,
     AUTO_REPLY_START_HOUR,
@@ -63,6 +70,13 @@ app = FastAPI(title="WA-Feishu Bridge", version="2.0.0")
 feishu = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
 reply_map = ReplyMap()
 scheduler_store = SchedulerStore(SCHEDULER_DB_PATH)
+attachment_store = PendingAttachmentStore(
+    SCHEDULER_DB_PATH,
+    ATTACHMENT_DIR,
+    ttl_seconds=ATTACHMENT_TTL_SECONDS,
+    max_files_per_user=ATTACHMENT_MAX_FILES,
+    max_bytes=ATTACHMENT_MAX_BYTES,
+)
 
 _llm: DeepSeekClient | None = None
 _evolution: EvolutionClient | None = None
@@ -144,11 +158,18 @@ def require_scheduler_auth(authorization: str | None = Header(default=None)) -> 
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
-async def call_codex(prompt: str, session_id: str | None = None) -> dict:
+async def call_codex(
+    prompt: str, session_id: str | None = None, input_files: list[str] | None = None
+) -> dict:
     if not CODEX_WORKER_URL or not CODEX_WORKER_TOKEN:
         raise RuntimeError("Codex worker is not configured")
     headers = {"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"}
-    body = {"prompt": prompt, "session_id": session_id, "workspace": "/workspace"}
+    body = {
+        "prompt": prompt,
+        "session_id": session_id,
+        "workspace": "/workspace",
+        "input_files": input_files or [],
+    }
     timeout = httpx.Timeout(CODEX_RUN_TIMEOUT_SECONDS + 30, connect=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(f"{CODEX_WORKER_URL}/v1/runs", json=body, headers=headers)
@@ -157,19 +178,75 @@ async def call_codex(prompt: str, session_id: str | None = None) -> dict:
     return response.json()
 
 
-def _marketing_prompt(text: str, chat_id: str) -> str:
+def _marketing_prompt(text: str, chat_id: str, inputs: list[dict] | None = None) -> str:
+    attachment_text = ""
+    if inputs:
+        lines = [
+            f"- {item['name']}（{item['mime_type']}）：{item['path']}" for item in inputs
+        ]
+        attachment_text = (
+            "\n本次用户消息附带以下本地文件。请直接读取并进行多模态理解，"
+            "无需调用额外的识别 skill：\n" + "\n".join(lines) + "\n"
+        )
     return f"""你正在通过飞书 marketing 群与用户对话。
 直接回答用户，不要复述本说明。需要创建、修改、暂停、恢复、立即运行或删除定时营销任务时，必须使用 marketing-scheduler skill；创建任务前确认时间、时区和任务内容。
 需要生成图片、视频、文档或其他文件时，必须把最终交付文件保存到 /workspace/codex-artifacts，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留在最终回复中。
 当前飞书 chat_id: {chat_id}
-
+{attachment_text}
 用户消息：
 {text}
 """
 
 
-async def process_marketing_message(chat_id: str, message_id: str, text: str) -> None:
+async def upload_codex_inputs(
+    attachments: list[PendingAttachment],
+) -> tuple[str, list[dict]]:
+    upload_id = uuid.uuid4().hex
+    headers = {"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"}
+    uploaded: list[dict] = []
+    timeout = httpx.Timeout(180, connect=15)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attachment in attachments:
+                data = await asyncio.to_thread(Path(attachment.local_path).read_bytes)
+                encoded_name = quote(attachment.file_name, safe="")
+                response = await client.put(
+                    f"{CODEX_WORKER_URL}/v1/inputs/{upload_id}/{encoded_name}",
+                    content=data,
+                    headers={**headers, "Content-Type": attachment.mime_type},
+                )
+                if response.status_code >= 400:
+                    raise RuntimeError(f"Codex input upload HTTP {response.status_code}")
+                uploaded.append(response.json())
+    except Exception:
+        await delete_codex_inputs(upload_id)
+        raise
+    return upload_id, uploaded
+
+
+async def delete_codex_inputs(upload_id: str) -> None:
+    if not upload_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.delete(
+                f"{CODEX_WORKER_URL}/v1/inputs/{upload_id}",
+                headers={"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"},
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to delete Codex inputs %s", upload_id)
+
+
+async def process_marketing_message(
+    chat_id: str,
+    message_id: str,
+    text: str,
+    attachments: list[PendingAttachment] | None = None,
+) -> None:
     command = text.strip()
+    attachments = attachments or []
+    upload_id = ""
+    uploaded_inputs: list[dict] = []
     progress_message_id: str | None = None
     progress_stop: asyncio.Event | None = None
     progress_task: asyncio.Task | None = None
@@ -218,8 +295,16 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
         progress_stop = asyncio.Event()
         progress_task = asyncio.create_task(progress_heartbeat(progress_stop))
 
+        if attachments:
+            await update_progress(f"📥 正在准备 {len(attachments)} 个附件…", "uploading")
+            upload_id, uploaded_inputs = await upload_codex_inputs(attachments)
+
         session_id = scheduler_store.get_session(chat_id)
-        result = await call_codex(_marketing_prompt(command, chat_id), session_id)
+        result = await call_codex(
+            _marketing_prompt(command, chat_id, uploaded_inputs),
+            session_id,
+            [item["path"] for item in uploaded_inputs],
+        )
         returned_session = result.get("session_id")
         if returned_session:
             scheduler_store.set_session(chat_id, returned_session)
@@ -248,6 +333,11 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
         error_message = f"❌ Codex 执行失败：{str(exc)[:500]}"
         if not await update_progress(error_message, "error"):
             await asyncio.to_thread(feishu.reply_text, message_id, error_message)
+    finally:
+        if upload_id:
+            await delete_codex_inputs(upload_id)
+        if attachments:
+            await asyncio.to_thread(attachment_store.cleanup_files, attachments)
 
 
 def _artifact_signature(path: str, expires: int) -> str:
@@ -342,6 +432,7 @@ async def run_scheduled_task(task, run_id: str) -> None:
 async def scheduler_loop() -> None:
     while True:
         try:
+            await asyncio.to_thread(attachment_store.purge_expired)
             due = await asyncio.to_thread(scheduler_store.claim_due)
             for task, run_id in due:
                 asyncio.create_task(run_scheduled_task(task, run_id))
@@ -499,6 +590,7 @@ async def health():
             "marketing_chat_configured": bool(MARKETING_CHAT_ID),
         },
         "scheduler": scheduler_store.health(),
+        "attachments": attachment_store.health(),
     }
 
 
@@ -629,6 +721,58 @@ async def feishu_event(request: Request):
     return await forward_feishu_payload(payload)
 
 
+def _sender_id(sender: dict) -> str:
+    values = sender.get("sender_id") or {}
+    return (
+        values.get("open_id")
+        or values.get("user_id")
+        or values.get("union_id")
+        or "unknown-user"
+    )
+
+
+async def stage_marketing_attachment(
+    *,
+    chat_id: str,
+    sender_id: str,
+    message_id: str,
+    message_type: str,
+    resource_key: str,
+    resource_type: str,
+    preferred_name: str = "",
+) -> None:
+    try:
+        data, mime_type, downloaded_name = await asyncio.to_thread(
+            feishu.download_resource,
+            message_id,
+            resource_key,
+            resource_type,
+        )
+        attachment = await asyncio.to_thread(
+            attachment_store.add,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            source_message_id=message_id,
+            message_type=message_type,
+            file_name=preferred_name or downloaded_name,
+            mime_type=mime_type,
+            data=data,
+        )
+        minutes = max(1, (ATTACHMENT_TTL_SECONDS + 59) // 60)
+        await asyncio.to_thread(
+            feishu.reply_text,
+            message_id,
+            f"✅ 已暂存附件 `{attachment.file_name}`。请在 {minutes} 分钟内发送文字要求；发送 `/cancel` 可取消。",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("failed to stage Feishu attachment")
+        await asyncio.to_thread(
+            feishu.reply_text,
+            message_id,
+            f"❌ 附件接收失败：{str(exc)[:300]}",
+        )
+
+
 async def _handle_receive(payload: dict) -> None:
     """Route marketing chat to Codex and card replies to WhatsApp."""
     event = payload.get("event") or {}
@@ -640,21 +784,60 @@ async def _handle_receive(payload: dict) -> None:
         return
 
     if MARKETING_CHAT_ID and chat_id == MARKETING_CHAT_ID:
-        if msg.get("message_type") != "text":
-            await asyncio.to_thread(
-                feishu.reply_text,
-                msg.get("message_id", ""),
-                "目前 Codex 对话入口先支持文本消息。",
-            )
-            return
+        message_type = msg.get("message_type")
+        message_id = msg.get("message_id", "")
+        sender_id = _sender_id(sender)
         try:
             content = json.loads(msg.get("content") or "{}")
         except json.JSONDecodeError:
             return
-        text = _strip_mention(content.get("text") or "")
-        message_id = msg.get("message_id", "")
-        if text and message_id:
-            asyncio.create_task(process_marketing_message(chat_id, message_id, text))
+        if message_type == "text":
+            text = _strip_mention(content.get("text") or "")
+            if not text or not message_id:
+                return
+            if text.strip() == "/cancel":
+                count = await asyncio.to_thread(
+                    attachment_store.cancel_for_user, chat_id, sender_id
+                )
+                message = f"已取消并清理 {count} 个待处理附件。" if count else "当前没有待处理附件。"
+                await asyncio.to_thread(feishu.reply_text, message_id, message)
+                return
+            attachments: list[PendingAttachment] = []
+            if text.strip() not in {"/session", "/new"} and not text.strip().startswith("/new "):
+                attachments = await asyncio.to_thread(
+                    attachment_store.pop_for_user, chat_id, sender_id
+                )
+            asyncio.create_task(
+                process_marketing_message(chat_id, message_id, text, attachments)
+            )
+            return
+
+        resource_key = ""
+        resource_type = "file"
+        preferred_name = content.get("file_name") or ""
+        if message_type == "image":
+            resource_key = content.get("image_key") or ""
+            resource_type = "image"
+        elif message_type in {"file", "media", "audio"}:
+            resource_key = content.get("file_key") or ""
+        if resource_key and message_id:
+            asyncio.create_task(
+                stage_marketing_attachment(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    message_id=message_id,
+                    message_type=message_type,
+                    resource_key=resource_key,
+                    resource_type=resource_type,
+                    preferred_name=preferred_name,
+                )
+            )
+        elif message_id:
+            await asyncio.to_thread(
+                feishu.reply_text,
+                message_id,
+                "暂不支持这种消息类型；请发送图片、视频、音频或文件。",
+            )
         return
 
     if chat_id != FEISHU_CHAT_ID or not parent_id:

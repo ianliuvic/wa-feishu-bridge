@@ -8,11 +8,13 @@ import json
 import logging
 import mimetypes
 import os
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +23,8 @@ WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "").strip()
 DEFAULT_WORKSPACE = Path(os.getenv("CODEX_WORKSPACE", "/workspace")).resolve()
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("CODEX_MAX_CONCURRENT_RUNS", "1")))
 RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800")))
+MAX_INPUT_BYTES = max(1024 * 1024, int(os.getenv("CODEX_MAX_INPUT_BYTES", str(50 * 1024 * 1024))))
+INPUT_ROOT = (DEFAULT_WORKSPACE / "codex-inputs").resolve()
 
 app = FastAPI(title="Codex Worker API", version="1.0.0")
 _run_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
@@ -33,6 +37,7 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     workspace: str | None = None
     ephemeral: bool = False
+    input_files: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ArtifactInfo(BaseModel):
@@ -65,6 +70,25 @@ def _resolve_workspace(value: str | None) -> Path:
         raise HTTPException(status_code=400, detail="workspace must be inside CODEX_WORKSPACE")
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
+
+
+def _resolve_input_file(value: str) -> Path:
+    path = Path(value).resolve()
+    if INPUT_ROOT not in path.parents or not path.is_file():
+        raise HTTPException(status_code=400, detail="input file is outside CODEX input storage")
+    return path
+
+
+def _cleanup_stale_inputs(max_age_seconds: int = 24 * 60 * 60) -> None:
+    if not INPUT_ROOT.exists():
+        return
+    cutoff = time.time() - max_age_seconds
+    for directory in INPUT_ROOT.iterdir():
+        try:
+            if directory.is_dir() and directory.stat().st_mtime < cutoff:
+                shutil.rmtree(directory)
+        except OSError:
+            logger.warning("failed to clean stale input directory %s", directory)
 
 
 def _extract_result(stdout: str) -> tuple[str | None, str]:
@@ -114,13 +138,25 @@ async def _execute(req: RunRequest) -> RunResponse:
     ]
     if req.ephemeral:
         base.append("--ephemeral")
+    input_paths = [_resolve_input_file(value) for value in req.input_files]
+    image_args: list[str] = []
+    for path in input_paths:
+        mime_type = mimetypes.guess_type(path.name)[0] or ""
+        if mime_type.startswith("image/"):
+            image_args.extend(["--image", str(path)])
     resumed = bool(req.session_id)
     if req.session_id:
-        command = [*base, "resume", req.session_id, req.prompt]
+        command = [*base, "resume", *image_args, req.session_id, req.prompt]
     else:
-        command = [*base, req.prompt]
+        command = [*base, *image_args, req.prompt]
 
-    logger.info("starting Codex run resumed=%s workspace=%s", resumed, workspace)
+    logger.info(
+        "starting Codex run resumed=%s workspace=%s inputs=%s images=%s",
+        resumed,
+        workspace,
+        len(input_paths),
+        len(image_args) // 2,
+    )
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
@@ -212,3 +248,43 @@ async def download_artifact(artifact_path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="artifact not found")
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@app.put("/v1/inputs/{upload_id}/{file_name}", dependencies=[Depends(require_auth)])
+async def upload_input(upload_id: str, file_name: str, request: Request) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", upload_id):
+        raise HTTPException(status_code=400, detail="invalid upload id")
+    safe_name = Path(file_name).name
+    if not safe_name or safe_name != file_name or len(safe_name) > 180:
+        raise HTTPException(status_code=400, detail="invalid file name")
+    data = await request.body()
+    if not data or len(data) > MAX_INPUT_BYTES:
+        raise HTTPException(status_code=413, detail="input file is empty or too large")
+    _cleanup_stale_inputs()
+    directory = INPUT_ROOT / upload_id
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / safe_name
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+    mime_type = request.headers.get("content-type") or mimetypes.guess_type(safe_name)[0]
+    logger.info("uploaded Codex input name=%s size=%s", safe_name, len(data))
+    return {
+        "path": str(path),
+        "name": safe_name,
+        "mime_type": mime_type or "application/octet-stream",
+        "size": len(data),
+    }
+
+
+@app.delete("/v1/inputs/{upload_id}", dependencies=[Depends(require_auth)])
+async def delete_inputs(upload_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", upload_id):
+        raise HTTPException(status_code=400, detail="invalid upload id")
+    directory = (INPUT_ROOT / upload_id).resolve()
+    if INPUT_ROOT not in directory.parents:
+        raise HTTPException(status_code=400, detail="invalid upload id")
+    existed = directory.exists()
+    if existed:
+        shutil.rmtree(directory)
+    return {"deleted": existed, "upload_id": upload_id}

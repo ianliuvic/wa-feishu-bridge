@@ -55,6 +55,12 @@ CODEX_WORKER_URL = os.getenv("CODEX_WORKER_URL", "").rstrip("/")
 CODEX_WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "")
 CODEX_RUN_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800"))
 BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", "https://wa-bridge.yiswim.cloud").rstrip("/")
+ATTACHMENT_DIR = os.getenv("ATTACHMENT_DIR", "/data/pending-attachments")
+ATTACHMENT_TTL_SECONDS = max(30, int(os.getenv("ATTACHMENT_TTL_SECONDS", "120")))
+ATTACHMENT_MAX_FILES = max(1, int(os.getenv("ATTACHMENT_MAX_FILES", "10")))
+ATTACHMENT_MAX_BYTES = max(
+    1024 * 1024, int(os.getenv("ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024)))
+)
 
 # Durable marketing job scheduler and its management API.
 SCHEDULER_DB_PATH = os.getenv("SCHEDULER_DB_PATH", "/data/marketing-scheduler.db")
