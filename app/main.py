@@ -386,6 +386,19 @@ async def list_scheduled_tasks():
     return {"tasks": [task.as_dict() for task in scheduler_store.list_tasks()]}
 
 
+@app.get("/api/codex/health", dependencies=[Depends(require_scheduler_auth)])
+async def codex_worker_health():
+    if not CODEX_WORKER_URL:
+        raise HTTPException(status_code=503, detail="CODEX_WORKER_URL is not configured")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{CODEX_WORKER_URL}/health")
+        response.raise_for_status()
+        return response.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Codex worker unavailable: {exc}") from exc
+
+
 @app.post("/api/scheduler/tasks", dependencies=[Depends(require_scheduler_auth)])
 async def create_scheduled_task(body: ScheduledTaskCreate):
     chat_id = (body.chat_id or MARKETING_CHAT_ID).strip()
