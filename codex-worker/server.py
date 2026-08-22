@@ -148,7 +148,7 @@ async def _execute(req: RunRequest) -> RunResponse:
     if req.session_id:
         command = [*base, "resume", *image_args, req.session_id, req.prompt]
     else:
-        command = [*base, *image_args, req.prompt]
+        command = [*base, *image_args, "--", req.prompt] if image_args else [*base, req.prompt]
 
     logger.info(
         "starting Codex run resumed=%s workspace=%s inputs=%s images=%s",
