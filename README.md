@@ -19,6 +19,33 @@ WhatsApp  →  Evolution API (webhook MESSAGES_UPSERT)  →  this service  →  
   `im.message.receive_v1` reply routing, proxies other events to mail-poller).
 - `GET /health` — liveness check.
 
+## Feishu marketing group -> Codex
+
+The same `/webhook/feishu` endpoint can also route text messages from a dedicated
+`marketing` group to the Coolify `codex-worker` API. The WhatsApp group remains
+configured separately, so its forwarding and reply behavior is unchanged.
+
+- Normal messages resume the current Codex session stored for the marketing chat.
+- `/new` clears the mapping and starts a fresh session on the next message.
+- `/session` shows the currently mapped Codex session id.
+- Codex has a bundled `marketing-scheduler` skill for creating and managing durable jobs.
+- Scheduled runs start a fresh Codex session, then post the final result to the target chat.
+
+Additional configuration:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MARKETING_CHAT_ID` | yes | Dedicated Feishu marketing group id |
+| `CODEX_WORKER_URL` | yes | Internal Codex worker URL |
+| `CODEX_WORKER_TOKEN` | yes | Shared bearer token for the worker API |
+| `SCHEDULER_API_TOKEN` | yes | Bearer token used by the scheduler skill |
+| `SCHEDULER_DB_PATH` | no | SQLite path, default `/data/marketing-scheduler.db` |
+| `SCHEDULER_DEFAULT_TIMEZONE` | no | Default `Asia/Shanghai` |
+| `SCHEDULER_POLL_SECONDS` | no | Due-job poll interval, default `15` |
+
+Mount `/data` as persistent storage. The scheduler API is available under
+`/api/scheduler/tasks` and requires `Authorization: Bearer ...`.
+
 ## Env vars
 
 | Variable | Required | Description |

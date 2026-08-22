@@ -44,6 +44,16 @@ class FeishuClient:
         }
         return self._send(url, headers, body)
 
+    def reply_text(self, message_id: str, text: str) -> dict:
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}/reply"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        return self._send(url, headers, body)
+
     def send_card(self, chat_id: str, card: dict) -> dict:
         token = self._get_token()
         url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"

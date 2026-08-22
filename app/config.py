@@ -47,3 +47,16 @@ FEISHU_EVENT_PATH = os.getenv("FEISHU_EVENT_PATH", "/webhook/feishu")
 # existing consumer keeps working. Feishu allows only ONE callback per app, so
 # this bridge acts as the single entry and proxies the rest.
 FEISHU_EVENT_FORWARD_URL = os.getenv("FEISHU_EVENT_FORWARD_URL", "")
+
+# Feishu marketing group -> Codex bridge. The WhatsApp target FEISHU_CHAT_ID stays
+# separate so the existing customer reply flow is not affected.
+MARKETING_CHAT_ID = os.getenv("MARKETING_CHAT_ID", "").strip()
+CODEX_WORKER_URL = os.getenv("CODEX_WORKER_URL", "").rstrip("/")
+CODEX_WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "")
+CODEX_RUN_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800"))
+
+# Durable marketing job scheduler and its management API.
+SCHEDULER_DB_PATH = os.getenv("SCHEDULER_DB_PATH", "/data/marketing-scheduler.db")
+SCHEDULER_API_TOKEN = os.getenv("SCHEDULER_API_TOKEN", "")
+SCHEDULER_DEFAULT_TIMEZONE = os.getenv("SCHEDULER_DEFAULT_TIMEZONE", "Asia/Shanghai")
+SCHEDULER_POLL_SECONDS = max(5, int(os.getenv("SCHEDULER_POLL_SECONDS", "15")))
