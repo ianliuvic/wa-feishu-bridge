@@ -54,12 +54,22 @@ class FeishuClient:
         }
         return self._send(url, headers, body)
 
-    def update_text(self, message_id: str, text: str) -> dict:
-        """Replace the content of a text message previously sent by the bot."""
+    def reply_card(self, message_id: str, card: dict) -> dict:
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}/reply"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        return self._send(url, headers, body)
+
+    def update_card(self, message_id: str, card: dict) -> dict:
+        """Replace an interactive card previously sent by the bot."""
         token = self._get_token()
         url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}"
         headers = {"Authorization": f"Bearer {token}"}
-        body = {"content": json.dumps({"text": text}, ensure_ascii=False)}
+        body = {"content": json.dumps(card, ensure_ascii=False)}
         resp = httpx.patch(url, json=body, headers=headers, timeout=15)
         data = self._check(resp, "update message")
         logger.info("updated message %s", message_id[:24])
@@ -84,6 +94,17 @@ class FeishuClient:
             "receive_id": chat_id,
             "msg_type": "file",
             "content": json.dumps({"file_key": file_key, "file_name": file_name}, ensure_ascii=False),
+        }
+        return self._send(url, headers, body)
+
+    def send_image_message(self, chat_id: str, image_key: str) -> dict:
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {
+            "receive_id": chat_id,
+            "msg_type": "image",
+            "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
         }
         return self._send(url, headers, body)
 
@@ -128,7 +149,10 @@ class FeishuClient:
         resp = httpx.post(
             url,
             headers=headers,
-            data={"file_type": "stream", "file_name": file_name},
+            data={
+                "file_type": "mp4" if mimetype == "video/mp4" else "stream",
+                "file_name": file_name,
+            },
             files={"file": (file_name, data, mimetype)},
             timeout=60,
         )

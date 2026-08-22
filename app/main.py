@@ -10,15 +10,17 @@
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import logging
 import re
 import time
 from collections import deque
+from urllib.parse import quote
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import cards
@@ -26,6 +28,7 @@ from .config import (
     AUTO_REPLY_ENABLED,
     AUTO_REPLY_END_HOUR,
     AUTO_REPLY_START_HOUR,
+    BRIDGE_PUBLIC_URL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -157,6 +160,7 @@ async def call_codex(prompt: str, session_id: str | None = None) -> dict:
 def _marketing_prompt(text: str, chat_id: str) -> str:
     return f"""你正在通过飞书 marketing 群与用户对话。
 直接回答用户，不要复述本说明。需要创建、修改、暂停、恢复、立即运行或删除定时营销任务时，必须使用 marketing-scheduler skill；创建任务前确认时间、时区和任务内容。
+需要生成图片、视频、文档或其他文件时，必须把最终交付文件保存到 /workspace/codex-artifacts，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留在最终回复中。
 当前飞书 chat_id: {chat_id}
 
 用户消息：
@@ -170,11 +174,13 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
     progress_stop: asyncio.Event | None = None
     progress_task: asyncio.Task | None = None
 
-    async def update_progress(status: str) -> bool:
+    async def update_progress(status: str, state: str = "working") -> bool:
         if not progress_message_id:
             return False
         try:
-            await asyncio.to_thread(feishu.update_text, progress_message_id, status)
+            await asyncio.to_thread(
+                feishu.update_card, progress_message_id, cards.codex_card(status, state)
+            )
             return True
         except Exception:  # noqa: BLE001
             logger.exception("failed to update Codex progress message")
@@ -204,7 +210,9 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
             return
 
         progress_result = await asyncio.to_thread(
-            feishu.reply_text, message_id, "🧠 Codex 正在分析你的请求…"
+            feishu.reply_card,
+            message_id,
+            cards.codex_card("🧠 正在分析你的请求…"),
         )
         progress_message_id = (progress_result.get("data") or {}).get("message_id")
         progress_stop = asyncio.Event()
@@ -218,8 +226,19 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
         progress_stop.set()
         await progress_task
-        if not await update_progress(answer[:28000]):
-            await asyncio.to_thread(feishu.reply_text, message_id, answer[:28000])
+        artifacts = result.get("artifacts") or []
+        delivery_notes: list[str] = []
+        if artifacts:
+            await update_progress(
+                f"📤 Codex 已完成内容，正在上传 {len(artifacts)} 个附件…",
+                "uploading",
+            )
+            delivery_notes = await deliver_codex_artifacts(chat_id, artifacts)
+        final_text = answer[:26000]
+        if delivery_notes:
+            final_text += "\n\n---\n**附件交付**\n" + "\n".join(delivery_notes)
+        if not await update_progress(final_text, "done"):
+            await asyncio.to_thread(feishu.reply_text, message_id, final_text[:28000])
     except Exception as exc:  # noqa: BLE001
         logger.exception("marketing Codex request failed")
         if progress_stop:
@@ -227,8 +246,65 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
         if progress_task:
             await progress_task
         error_message = f"❌ Codex 执行失败：{str(exc)[:500]}"
-        if not await update_progress(error_message):
+        if not await update_progress(error_message, "error"):
             await asyncio.to_thread(feishu.reply_text, message_id, error_message)
+
+
+def _artifact_signature(path: str, expires: int) -> str:
+    payload = f"{path}\n{expires}".encode()
+    return hmac.new(CODEX_WORKER_TOKEN.encode(), payload, hashlib.sha256).hexdigest()
+
+
+def _artifact_link(path: str) -> str:
+    expires = int(time.time()) + 7 * 24 * 60 * 60
+    signature = _artifact_signature(path, expires)
+    return (
+        f"{BRIDGE_PUBLIC_URL}/api/codex/artifact?path={quote(path, safe='')}"
+        f"&expires={expires}&sig={signature}"
+    )
+
+
+async def _fetch_codex_artifact(path: str) -> tuple[bytes, str]:
+    headers = {"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"}
+    encoded_path = quote(path, safe="/")
+    timeout = httpx.Timeout(180, connect=15)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(
+            f"{CODEX_WORKER_URL}/v1/artifacts/{encoded_path}", headers=headers
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Codex artifact HTTP {response.status_code}")
+    return response.content, response.headers.get("content-type", "application/octet-stream")
+
+
+async def deliver_codex_artifacts(chat_id: str, artifacts: list[dict]) -> list[str]:
+    notes: list[str] = []
+    for artifact in artifacts[:20]:
+        path = str(artifact.get("path") or "")
+        name = str(artifact.get("name") or "artifact")
+        mime_type = str(artifact.get("mime_type") or "application/octet-stream")
+        size = int(artifact.get("size") or 0)
+        link = _artifact_link(path) if path and BRIDGE_PUBLIC_URL else ""
+        try:
+            limit = IMAGE_MAX_BYTES if mime_type.startswith("image/") else DOC_MAX_BYTES
+            if size > limit:
+                raise RuntimeError(f"文件大小 {_fmt_size(size)} 超过飞书上传限制")
+            data, detected_type = await _fetch_codex_artifact(path)
+            mime_type = detected_type.split(";", 1)[0] or mime_type
+            if mime_type.startswith("image/"):
+                image_key = await asyncio.to_thread(feishu.upload_image, data, mime_type)
+                await asyncio.to_thread(feishu.send_image_message, chat_id, image_key)
+            else:
+                file_key = await asyncio.to_thread(feishu.upload_file, data, name, mime_type)
+                await asyncio.to_thread(feishu.send_file_message, chat_id, file_key, name)
+            notes.append(f"- ✅ `{name}` 已发送到群聊")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("failed to deliver Codex artifact %s", path)
+            if link:
+                notes.append(f"- 📎 [{name}]({link})（下载链接 7 天有效；{str(exc)[:120]}）")
+            else:
+                notes.append(f"- ⚠️ `{name}` 交付失败：{str(exc)[:160]}")
+    return notes
 
 
 async def run_scheduled_task(task, run_id: str) -> None:
@@ -236,12 +312,16 @@ async def run_scheduled_task(task, run_id: str) -> None:
 任务名称：{task.name}
 任务时区：{task.timezone}
 请现在完成以下任务，并给出适合直接发送到飞书审核的最终结果。可按需使用已安装的 skills。
+需要生成图片、视频、文档或其他文件时，必须把最终交付文件保存到 /workspace/codex-artifacts，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留。
 
 {task.prompt}
 """
     try:
         result = await call_codex(prompt)
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
+        delivery_notes = await deliver_codex_artifacts(task.chat_id, result.get("artifacts") or [])
+        if delivery_notes:
+            answer += "\n\n附件交付：\n" + "\n".join(delivery_notes)
         await asyncio.to_thread(
             feishu.send_text, task.chat_id, f"【定时任务：{task.name}】\n{answer[:27500]}"
         )
@@ -420,6 +500,24 @@ async def health():
         },
         "scheduler": scheduler_store.health(),
     }
+
+
+@app.get("/api/codex/artifact")
+async def download_codex_artifact(path: str, expires: int, sig: str) -> Response:
+    """Proxy a worker artifact through a short-lived signed public link."""
+    now = int(time.time())
+    if expires < now or expires > now + 8 * 24 * 60 * 60:
+        raise HTTPException(status_code=403, detail="artifact link expired")
+    expected = _artifact_signature(path, expires)
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="invalid artifact signature")
+    data, media_type = await _fetch_codex_artifact(path)
+    name = path.rsplit("/", 1)[-1] or "artifact"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+    )
 
 
 @app.get("/api/scheduler/tasks", dependencies=[Depends(require_scheduler_auth)])

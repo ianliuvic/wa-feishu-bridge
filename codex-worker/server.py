@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
+import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 
@@ -20,6 +24,8 @@ RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800")
 
 app = FastAPI(title="Codex Worker API", version="1.0.0")
 _run_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
+_active_runs = 0
+logger = logging.getLogger("codex-worker")
 
 
 class RunRequest(BaseModel):
@@ -29,10 +35,18 @@ class RunRequest(BaseModel):
     ephemeral: bool = False
 
 
+class ArtifactInfo(BaseModel):
+    path: str
+    name: str
+    mime_type: str
+    size: int
+
+
 class RunResponse(BaseModel):
     session_id: str | None
     response: str
     resumed: bool
+    artifacts: list[ArtifactInfo] = Field(default_factory=list)
 
 
 def require_auth(authorization: str | None = Header(default=None)) -> None:
@@ -75,7 +89,15 @@ def _extract_result(stdout: str) -> tuple[str | None, str]:
 
 
 async def _execute(req: RunRequest) -> RunResponse:
+    started_at = time.monotonic()
     workspace = _resolve_workspace(req.workspace)
+    artifact_root = workspace / "codex-artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    before = {
+        path.resolve(): (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in artifact_root.rglob("*")
+        if path.is_file()
+    }
     base = [
         "codex",
         "exec",
@@ -98,6 +120,7 @@ async def _execute(req: RunRequest) -> RunResponse:
     else:
         command = [*base, req.prompt]
 
+    logger.info("starting Codex run resumed=%s workspace=%s", resumed, workspace)
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
@@ -116,6 +139,7 @@ async def _execute(req: RunRequest) -> RunResponse:
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
     if process.returncode != 0:
+        logger.error("Codex run failed returncode=%s", process.returncode)
         detail = (stderr or stdout or "Codex execution failed")[-4000:]
         raise HTTPException(status_code=502, detail=detail)
 
@@ -124,7 +148,38 @@ async def _execute(req: RunRequest) -> RunResponse:
         session_id = req.session_id
     if not response:
         raise HTTPException(status_code=502, detail="Codex returned no final message")
-    return RunResponse(session_id=session_id, response=response, resumed=resumed)
+
+    artifacts: list[ArtifactInfo] = []
+    changed: list[Path] = []
+    for path in artifact_root.rglob("*"):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        state = (path.stat().st_mtime_ns, path.stat().st_size)
+        if before.get(resolved) != state:
+            changed.append(path)
+    for path in sorted(changed, key=lambda item: item.stat().st_mtime_ns, reverse=True)[:20]:
+        relative = path.resolve().relative_to(workspace).as_posix()
+        artifacts.append(
+            ArtifactInfo(
+                path=relative,
+                name=path.name,
+                mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                size=path.stat().st_size,
+            )
+        )
+    logger.info(
+        "completed Codex run resumed=%s artifacts=%s elapsed_seconds=%.1f",
+        resumed,
+        len(artifacts),
+        time.monotonic() - started_at,
+    )
+    return RunResponse(
+        session_id=session_id,
+        response=response,
+        resumed=resumed,
+        artifacts=artifacts,
+    )
 
 
 @app.get("/health")
@@ -134,10 +189,26 @@ async def health() -> dict[str, Any]:
         "token_configured": bool(WORKER_TOKEN),
         "workspace": str(DEFAULT_WORKSPACE),
         "max_concurrent_runs": MAX_CONCURRENT_RUNS,
+        "active_runs": _active_runs,
     }
 
 
 @app.post("/v1/runs", response_model=RunResponse, dependencies=[Depends(require_auth)])
 async def run_codex(req: RunRequest) -> RunResponse:
+    global _active_runs
     async with _run_slots:
-        return await _execute(req)
+        _active_runs += 1
+        try:
+            return await _execute(req)
+        finally:
+            _active_runs -= 1
+
+
+@app.get("/v1/artifacts/{artifact_path:path}", dependencies=[Depends(require_auth)])
+async def download_artifact(artifact_path: str) -> FileResponse:
+    artifact_root = (DEFAULT_WORKSPACE / "codex-artifacts").resolve()
+    path = (DEFAULT_WORKSPACE / artifact_path).resolve()
+    if path == artifact_root or artifact_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)

@@ -54,6 +54,7 @@ MARKETING_CHAT_ID = os.getenv("MARKETING_CHAT_ID", "").strip()
 CODEX_WORKER_URL = os.getenv("CODEX_WORKER_URL", "").rstrip("/")
 CODEX_WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "")
 CODEX_RUN_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800"))
+BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", "https://wa-bridge.yiswim.cloud").rstrip("/")
 
 # Durable marketing job scheduler and its management API.
 SCHEDULER_DB_PATH = os.getenv("SCHEDULER_DB_PATH", "/data/marketing-scheduler.db")

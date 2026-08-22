@@ -109,3 +109,22 @@ def error_card(reason: str) -> dict:
             {"tag": "markdown", "content": f"❌ 回复未能发送：`{reason}`"},
         ],
     }
+
+
+def codex_card(content: str, state: str = "working") -> dict:
+    """Build the editable status/result card used by the marketing Codex bridge."""
+    styles = {
+        "working": ("blue", "Codex 正在工作"),
+        "uploading": ("orange", "Codex 正在交付文件"),
+        "done": ("green", "Codex 已完成"),
+        "error": ("red", "Codex 执行失败"),
+    }
+    template, title = styles.get(state, styles["working"])
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": template,
+            "title": {"tag": "plain_text", "content": title},
+        },
+        "elements": [{"tag": "markdown", "content": content}],
+    }
