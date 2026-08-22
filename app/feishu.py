@@ -54,6 +54,17 @@ class FeishuClient:
         }
         return self._send(url, headers, body)
 
+    def update_text(self, message_id: str, text: str) -> dict:
+        """Replace the content of a text message previously sent by the bot."""
+        token = self._get_token()
+        url = f"{self.api_base}/open-apis/im/v1/messages/{message_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        body = {"content": json.dumps({"text": text}, ensure_ascii=False)}
+        resp = httpx.patch(url, json=body, headers=headers, timeout=15)
+        data = self._check(resp, "update message")
+        logger.info("updated message %s", message_id[:24])
+        return data
+
     def send_card(self, chat_id: str, card: dict) -> dict:
         token = self._get_token()
         url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"

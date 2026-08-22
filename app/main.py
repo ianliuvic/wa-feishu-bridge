@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import re
+import time
 from collections import deque
 
 import httpx
@@ -165,6 +166,32 @@ def _marketing_prompt(text: str, chat_id: str) -> str:
 
 async def process_marketing_message(chat_id: str, message_id: str, text: str) -> None:
     command = text.strip()
+    progress_message_id: str | None = None
+    progress_stop: asyncio.Event | None = None
+    progress_task: asyncio.Task | None = None
+
+    async def update_progress(status: str) -> bool:
+        if not progress_message_id:
+            return False
+        try:
+            await asyncio.to_thread(feishu.update_text, progress_message_id, status)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to update Codex progress message")
+            return False
+
+    async def progress_heartbeat(stop: asyncio.Event) -> None:
+        started_at = time.monotonic()
+        interval = 8
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                elapsed = max(1, int(time.monotonic() - started_at))
+                await update_progress(f"⚙️ Codex 正在执行…（已用时 {elapsed} 秒）")
+                interval = 15
+
     try:
         if command == "/new" or command.startswith("/new "):
             scheduler_store.clear_session(chat_id)
@@ -176,18 +203,32 @@ async def process_marketing_message(chat_id: str, message_id: str, text: str) ->
             await asyncio.to_thread(feishu.reply_text, message_id, message)
             return
 
+        progress_result = await asyncio.to_thread(
+            feishu.reply_text, message_id, "🧠 Codex 正在分析你的请求…"
+        )
+        progress_message_id = (progress_result.get("data") or {}).get("message_id")
+        progress_stop = asyncio.Event()
+        progress_task = asyncio.create_task(progress_heartbeat(progress_stop))
+
         session_id = scheduler_store.get_session(chat_id)
         result = await call_codex(_marketing_prompt(command, chat_id), session_id)
         returned_session = result.get("session_id")
         if returned_session:
             scheduler_store.set_session(chat_id, returned_session)
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
-        await asyncio.to_thread(feishu.reply_text, message_id, answer[:28000])
+        progress_stop.set()
+        await progress_task
+        if not await update_progress(answer[:28000]):
+            await asyncio.to_thread(feishu.reply_text, message_id, answer[:28000])
     except Exception as exc:  # noqa: BLE001
         logger.exception("marketing Codex request failed")
-        await asyncio.to_thread(
-            feishu.reply_text, message_id, f"Codex 执行失败：{str(exc)[:500]}"
-        )
+        if progress_stop:
+            progress_stop.set()
+        if progress_task:
+            await progress_task
+        error_message = f"❌ Codex 执行失败：{str(exc)[:500]}"
+        if not await update_progress(error_message):
+            await asyncio.to_thread(feishu.reply_text, message_id, error_message)
 
 
 async def run_scheduled_task(task, run_id: str) -> None:
