@@ -1,0 +1,12 @@
+interface:
+  display_name: "Google Ads"
+  short_description: "Read, analyze, and safely manage Google Ads accounts"
+  default_prompt: "Use $google-ads to audit my Google Ads account and propose safe improvements."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "google-ads-mcp"
+      description: "Configured Google Ads API connection for account discovery, GAQL reads, and validated mutations"
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true
