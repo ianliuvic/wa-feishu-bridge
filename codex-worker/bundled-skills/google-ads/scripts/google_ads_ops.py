@@ -111,9 +111,21 @@ def load_mcp_environment() -> dict[str, str]:
 def get_client() -> Any:
     load_mcp_environment()
     try:
-        from ads_mcp import utils
+        import google.auth
+        from google.ads.googleads.client import GoogleAdsClient
 
-        return utils.get_googleads_client()
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/adwords"]
+        )
+        kwargs: dict[str, Any] = {
+            "credentials": credentials,
+            "developer_token": os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
+            "use_proto_plus": True,
+        }
+        login_customer_id = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+        if login_customer_id:
+            kwargs["login_customer_id"] = login_customer_id
+        return GoogleAdsClient(**kwargs)
     except Exception as exc:
         fail(f"Unable to initialize Google Ads client: {type(exc).__name__}: {exc}")
 
