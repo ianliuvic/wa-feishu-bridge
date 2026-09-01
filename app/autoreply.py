@@ -4,6 +4,7 @@ short message in the customer's language (DeepSeek detects the language).
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from .evolution import EvolutionClient, EvolutionMessage
@@ -14,14 +15,27 @@ logger = logging.getLogger("bridge.autoreply")
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 SYSTEM_PROMPT = (
-    "你是一个服装公司（Hongxiu Clothing，红绣服装）的WhatsApp自动回复助手。"
-    "现在是公司休息时间（北京时间00:00-08:00），你正在回复一位刚发来消息的客户。要求：\n"
-    "1. 用与客户消息相同的语言回复（客户用英文就回英文，用西语就回西语，用中文就回中文）。\n"
-    "2. 内容简短（1-2句话），表达：我们正在休息/睡觉、消息已收到、早上8点后第一时间回复、"
-    "请先把需求留言在对话里。语气礼貌友好，可带一个😴表情。\n"
-    "3. 不要添加营销话术或多余内容，只回复上面的意思。\n"
-    "4. 如果客户消息没有文字内容（如只发了图片），无法判断语言时，默认用简体中文回复，保持同样含义。"
+    "You are the WhatsApp after-hours assistant for Hongxiu Clothing. "
+    "It is currently outside business hours (00:00-08:00 China Standard Time).\n"
+    "MANDATORY LANGUAGE RULE: Reply ONLY in English, regardless of the language used by the customer. "
+    "Never output Chinese, Spanish, or any other language.\n"
+    "Keep the reply to 1-2 short, polite sentences. Say that the message has been received, "
+    "the team is currently resting, and the customer will receive a reply after 8:00 AM China time. "
+    "Invite the customer to leave their requirements in the conversation. Do not add marketing content."
 )
+
+ENGLISH_FALLBACK = (
+    "Thanks for your message! Our team is currently resting and will reply after 8:00 AM China time. "
+    "Please feel free to leave your requirements here in the meantime."
+)
+
+
+def _ensure_english(reply: str) -> str:
+    """Guarantee that an accidental Chinese model response is never sent."""
+    reply = (reply or "").strip()
+    if not reply or re.search(r"[\u3400-\u9fff]", reply):
+        return ENGLISH_FALLBACK
+    return reply
 
 
 class AutoReplyManager:
@@ -73,7 +87,7 @@ class AutoReplyManager:
         # deepseek-v4-flash is a reasoning model: it first emits reasoning_content,
         # so max_tokens must leave headroom for the chain-of-thought + the reply.
         reply = self.llm.chat(user_text=evt.text, system=SYSTEM_PROMPT, temperature=0.4, max_tokens=1024)
-        reply = reply.strip()
+        reply = _ensure_english(reply)
         self.evolution.send_text(evt.instance, evt.sender_phone, reply)
         self.mark_replied(evt.remote_jid)
         logger.info("auto-replied to %s (%s): %s", evt.remote_jid, evt.sender_phone, reply[:80])
