@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -17,6 +19,14 @@ from zoneinfo import ZoneInfo
 DEFAULT_SHOP = "w4ik1r-x5.myshopify.com"
 DEFAULT_API_VERSION = "2026-07"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
+DEFAULT_POD_API_URL = "https://pod-api.wearhongxiu.com"
+DEFAULT_ARTIFACT_DIR = "/workspace/codex-artifacts"
+POD_PAGE_SIZE = 500
+SENSITIVE_KEY = re.compile(
+    r"^(?:email|phone|telephone|first_?name|last_?name|full_?name|customer_?id|address|address[12]|"
+    r"city|province|state|postal_?code|zip|country_?code|ip|ip_?address)$",
+    re.IGNORECASE,
+)
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -33,6 +43,115 @@ def request_json(request: Request, timeout: int = 60) -> dict:
         raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"network error: {exc.reason}") from exc
+
+
+def redact_personal_data(value: object) -> tuple[object, int]:
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        redactions = 0
+        for key, item in value.items():
+            if SENSITIVE_KEY.match(str(key)):
+                result[str(key)] = "[REDACTED]"
+                redactions += 1
+            else:
+                cleaned, count = redact_personal_data(item)
+                result[str(key)] = cleaned
+                redactions += count
+        return result, redactions
+    if isinstance(value, list):
+        result_list = []
+        redactions = 0
+        for item in value:
+            cleaned, count = redact_personal_data(item)
+            result_list.append(cleaned)
+            redactions += count
+        return result_list, redactions
+    return value, 0
+
+
+def pod_config() -> tuple[str, str]:
+    api_url = os.getenv("POD_API_URL", DEFAULT_POD_API_URL).strip().rstrip("/")
+    token = os.getenv("POD_MONITORING_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("missing environment variable: POD_MONITORING_TOKEN")
+    return api_url, token
+
+
+def pod_day_bounds(as_of: date) -> tuple[datetime, datetime]:
+    zone = ZoneInfo(DEFAULT_TIMEZONE)
+    until = datetime.combine(as_of, datetime.min.time(), zone)
+    return until - timedelta(days=1), until
+
+
+def collect_pod_designs(as_of: date, artifact_dir: str) -> dict:
+    api_url, token = pod_config()
+    since, until = pod_day_bounds(as_of)
+    records: list[dict] = []
+    total: int | None = None
+    offset = 0
+    while total is None or offset < total:
+        query = urlencode({
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "limit": POD_PAGE_SIZE,
+            "offset": offset,
+        })
+        request = Request(
+            f"{api_url}/internal/designs?{query}",
+            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+        )
+        payload = request_json(request, timeout=90)
+        page = payload.get("designs")
+        if not isinstance(page, list) or not isinstance(payload.get("total"), int):
+            raise RuntimeError("POD API returned an invalid design-list response")
+        if total is None:
+            total = payload["total"]
+        elif total != payload["total"]:
+            raise RuntimeError("POD design total changed during pagination; retry the report")
+        records.extend(item for item in page if isinstance(item, dict))
+        offset += len(page)
+        if not page:
+            break
+    if total is None or len(records) != total:
+        raise RuntimeError(f"POD API pagination incomplete: expected {total or 0}, received {len(records)}")
+
+    cleaned_records, redactions = redact_personal_data(records)
+    day = (as_of - timedelta(days=1)).isoformat()
+    output_dir = Path(artifact_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifact = output_dir / f"pod-designs-{day}.json"
+    export = {
+        "schema": "hongxiu-pod-design-export-v1",
+        "period": {"since": since.isoformat(), "until": until.isoformat(), "timezone": DEFAULT_TIMEZONE},
+        "count": len(records),
+        "personal_data_redactions": redactions,
+        "designs": cleaned_records,
+    }
+    artifact.write_text(json.dumps(export, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    items = []
+    for record in records:
+        design = record.get("design") if isinstance(record.get("design"), dict) else {}
+        quantities = design.get("quantities") if isinstance(design.get("quantities"), dict) else {}
+        items.append({
+            "id": record.get("id"),
+            "created_at": record.get("createdAt"),
+            "updated_at": record.get("updatedAt"),
+            "product_id": design.get("productId"),
+            "mode": design.get("mode"),
+            "layer_count": len(design.get("layers") or []),
+            "preview_count": len(design.get("previews") or []),
+            "surface_count": len(design.get("surfaces") or []),
+            "quantity_total": sum(value for value in quantities.values() if isinstance(value, int)),
+        })
+    return {
+        "ok": True,
+        "period": export["period"],
+        "count": len(records),
+        "personal_data_redactions": redactions,
+        "artifact": str(artifact),
+        "items": items,
+    }
 
 
 def get_config() -> dict[str, str]:
@@ -230,12 +349,22 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     report = subparsers.add_parser("report", help="collect complete-day Shopify analytics")
     report.add_argument("--as-of", help="report run date in YYYY-MM-DD; defaults to Asia/Shanghai today")
+    daily = subparsers.add_parser("daily", help="collect Shopify analytics and the previous day's POD designs")
+    daily.add_argument("--as-of", help="report run date in YYYY-MM-DD; defaults to Asia/Shanghai today")
+    daily.add_argument("--artifact-dir", default=DEFAULT_ARTIFACT_DIR)
+    pod = subparsers.add_parser("pod-designs", help="export the previous complete day's POD design JSON")
+    pod.add_argument("--as-of", help="report run date in YYYY-MM-DD; defaults to Asia/Shanghai today")
+    pod.add_argument("--artifact-dir", default=DEFAULT_ARTIFACT_DIR)
     subparsers.add_parser("probe", help="verify authentication and read_reports")
     args = parser.parse_args()
 
     try:
-        config = get_config()
-        token, scopes = fetch_token(config)
+        as_of = parse_as_of(getattr(args, "as_of", None))
+        if args.command == "pod-designs":
+            result = collect_pod_designs(as_of, args.artifact_dir)
+        else:
+            config = get_config()
+            token, scopes = fetch_token(config)
         if args.command == "probe":
             result = {
                 "ok": True,
@@ -243,8 +372,11 @@ def main() -> None:
                 "api_version": config["api_version"],
                 "read_reports_granted": "read_reports" in scopes,
             }
-        else:
-            result = run_report(config, token, scopes, parse_as_of(args.as_of))
+        elif args.command == "report":
+            result = run_report(config, token, scopes, as_of)
+        elif args.command == "daily":
+            result = run_report(config, token, scopes, as_of)
+            result["pod_designs"] = collect_pod_designs(as_of, args.artifact_dir)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (RuntimeError, ValueError) as exc:
         fail(str(exc))
