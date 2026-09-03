@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /root/.codex/skills/marketing-scheduler /root/.codex/skills/playwright-browser /root/.codex/skills/google-ads /root/.codex/skills/hongxiu-weekly-product-email /root/.codex/skills/shopify-analytics /root/.codex/skills/zoho-api /root/.zoho-api /workspace /workspace/codex-artifacts /browser-data/profile
+mkdir -p /root/.codex/skills/marketing-scheduler /root/.codex/skills/playwright-browser /root/.codex/skills/google-ads /root/.codex/skills/hongxiu-weekly-product-email /root/.codex/skills/shopify-analytics /root/.codex/skills/zoho-api /root/.codex/skills/reddit-ops /root/.zoho-api /workspace /workspace/codex-artifacts /browser-data/profile
 cp -R /opt/codex-worker/bundled-skills/marketing-scheduler/. /root/.codex/skills/marketing-scheduler/
 cp -R /opt/codex-worker/bundled-skills/playwright-browser/. /root/.codex/skills/playwright-browser/
 cp -R /opt/codex-worker/bundled-skills/google-ads/. /root/.codex/skills/google-ads/
 cp -R /opt/codex-worker/bundled-skills/hongxiu-weekly-product-email/. /root/.codex/skills/hongxiu-weekly-product-email/
 cp -R /opt/codex-worker/bundled-skills/shopify-analytics/. /root/.codex/skills/shopify-analytics/
 cp -R /opt/codex-worker/bundled-skills/zoho-api/. /root/.codex/skills/zoho-api/
+cp -R /opt/codex-worker/bundled-skills/reddit-ops/. /root/.codex/skills/reddit-ops/
 
 if [ -n "${ZOHO_REGION:-}" ] && [ -n "${ZOHO_CLIENT_ID:-}" ] && [ -n "${ZOHO_CLIENT_SECRET:-}" ] && [ -n "${ZOHO_REFRESH_TOKEN:-}" ]; then
     umask 077

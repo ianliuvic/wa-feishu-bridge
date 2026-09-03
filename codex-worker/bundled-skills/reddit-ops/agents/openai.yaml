@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reddit Ops"
+  short_description: "Inspect the persistent Coolify Reddit browser"
+  default_prompt: "Use the persistent Reddit browser to inspect account state or Reddit pages safely."
