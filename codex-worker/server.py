@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
+import hashlib
+import html
 import json
 import logging
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 
@@ -25,11 +32,136 @@ MAX_CONCURRENT_RUNS = max(1, int(os.getenv("CODEX_MAX_CONCURRENT_RUNS", "1")))
 RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800")))
 MAX_INPUT_BYTES = max(1024 * 1024, int(os.getenv("CODEX_MAX_INPUT_BYTES", str(50 * 1024 * 1024))))
 INPUT_ROOT = (DEFAULT_WORKSPACE / "codex-inputs").resolve()
+LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID", "").strip()
+LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET", "").strip()
+LINKEDIN_REDIRECT_URI = os.getenv(
+    "LINKEDIN_REDIRECT_URI",
+    "https://codex-worker.yiswim.cloud/linkedin/oauth/callback",
+).strip()
+LINKEDIN_STATE_SECRET = os.getenv("LINKEDIN_STATE_SECRET", "").strip()
+LINKEDIN_OAUTH_SCOPES = os.getenv(
+    "LINKEDIN_OAUTH_SCOPES", "openid profile w_member_social"
+).strip()
+LINKEDIN_TOKEN_PATH = Path(
+    os.getenv("LINKEDIN_TOKEN_PATH", "/root/.codex/linkedin/oauth.json")
+).resolve()
+LINKEDIN_STATE_TTL_SECONDS = 10 * 60
 
 app = FastAPI(title="Codex Worker API", version="1.0.0")
 _run_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
 _active_runs = 0
 logger = logging.getLogger("codex-worker")
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _linkedin_ready() -> bool:
+    return bool(
+        LINKEDIN_CLIENT_ID
+        and LINKEDIN_CLIENT_SECRET
+        and LINKEDIN_REDIRECT_URI
+        and LINKEDIN_STATE_SECRET
+    )
+
+
+def _linkedin_state() -> str:
+    payload = json.dumps(
+        {"iat": int(time.time()), "nonce": secrets.token_urlsafe(18)},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encoded = _b64url_encode(payload)
+    signature = hmac.new(
+        LINKEDIN_STATE_SECRET.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).digest()
+    return f"{encoded}.{_b64url_encode(signature)}"
+
+
+def _validate_linkedin_state(value: str) -> None:
+    try:
+        encoded, supplied = value.split(".", 1)
+        expected = hmac.new(
+            LINKEDIN_STATE_SECRET.encode("utf-8"),
+            encoded.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(_b64url_decode(supplied), expected):
+            raise ValueError("signature")
+        payload = json.loads(_b64url_decode(encoded))
+        issued_at = int(payload["iat"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid OAuth state") from exc
+    age = int(time.time()) - issued_at
+    if age < -60 or age > LINKEDIN_STATE_TTL_SECONDS:
+        raise HTTPException(status_code=400, detail="expired OAuth state")
+
+
+def _linkedin_json_request(
+    url: str,
+    *,
+    method: str = "GET",
+    data: dict[str, str] | None = None,
+    access_token: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    headers = {"Accept": "application/json", "User-Agent": "HongxiuCodexWorker/1.0"}
+    body = None
+    if data is not None:
+        body = urlencode(data).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    request = UrlRequest(url, data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise HTTPException(
+            status_code=502, detail=f"LinkedIn API returned HTTP {exc.code}: {detail}"
+        ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(status_code=502, detail="LinkedIn API is unavailable") from exc
+    try:
+        value = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="LinkedIn returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=502, detail="LinkedIn returned an unexpected response")
+    return value, response_headers
+
+
+def _save_linkedin_token(token: dict[str, Any], profile: dict[str, Any]) -> None:
+    subject = str(profile.get("sub") or profile.get("id") or "").strip()
+    if not subject:
+        raise HTTPException(
+            status_code=502,
+            detail="LinkedIn did not return a member ID; enable Sign In with LinkedIn using OpenID Connect",
+        )
+    now = int(time.time())
+    expires_in = max(0, int(token.get("expires_in") or 0))
+    record = {
+        "access_token": str(token.get("access_token") or ""),
+        "refresh_token": str(token.get("refresh_token") or ""),
+        "expires_at": now + expires_in,
+        "refresh_token_expires_in": int(token.get("refresh_token_expires_in") or 0),
+        "scope": str(token.get("scope") or LINKEDIN_OAUTH_SCOPES),
+        "person_urn": f"urn:li:person:{subject}",
+        "name": str(profile.get("name") or "").strip(),
+        "authorized_at": now,
+    }
+    if not record["access_token"]:
+        raise HTTPException(status_code=502, detail="LinkedIn returned no access token")
+    LINKEDIN_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LINKEDIN_TOKEN_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    temporary.replace(LINKEDIN_TOKEN_PATH)
 
 
 class RunRequest(BaseModel):
@@ -227,6 +359,97 @@ async def health() -> dict[str, Any]:
         "max_concurrent_runs": MAX_CONCURRENT_RUNS,
         "active_runs": _active_runs,
     }
+
+
+@app.post(
+    "/v1/linkedin/oauth/url", dependencies=[Depends(require_auth)]
+)
+async def linkedin_oauth_url() -> dict[str, Any]:
+    if not _linkedin_ready():
+        raise HTTPException(status_code=503, detail="LinkedIn OAuth is not configured")
+    query = urlencode(
+        {
+            "response_type": "code",
+            "client_id": LINKEDIN_CLIENT_ID,
+            "redirect_uri": LINKEDIN_REDIRECT_URI,
+            "state": _linkedin_state(),
+            "scope": LINKEDIN_OAUTH_SCOPES,
+        }
+    )
+    return {
+        "authorize_url": f"https://www.linkedin.com/oauth/v2/authorization?{query}",
+        "redirect_uri": LINKEDIN_REDIRECT_URI,
+        "scope": LINKEDIN_OAUTH_SCOPES,
+    }
+
+
+@app.get("/linkedin/oauth/callback", response_class=HTMLResponse)
+async def linkedin_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> HTMLResponse:
+    if not _linkedin_ready():
+        raise HTTPException(status_code=503, detail="LinkedIn OAuth is not configured")
+    if error:
+        message = html.escape((error_description or error)[:300])
+        return HTMLResponse(
+            f"<h1>LinkedIn authorization failed</h1><p>{message}</p>", status_code=400
+        )
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="missing OAuth code or state")
+    _validate_linkedin_state(state)
+    token, _ = _linkedin_json_request(
+        "https://www.linkedin.com/oauth/v2/accessToken",
+        method="POST",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": LINKEDIN_CLIENT_ID,
+            "client_secret": LINKEDIN_CLIENT_SECRET,
+            "redirect_uri": LINKEDIN_REDIRECT_URI,
+        },
+    )
+    profile, _ = _linkedin_json_request(
+        "https://api.linkedin.com/v2/userinfo",
+        access_token=str(token.get("access_token") or ""),
+    )
+    _save_linkedin_token(token, profile)
+    name = html.escape(str(profile.get("name") or "LinkedIn member"))
+    return HTMLResponse(
+        "<h1>LinkedIn authorization complete</h1>"
+        f"<p>{name} is now connected to the Hongxiu Codex publishing workflow.</p>"
+        "<p>You can close this page.</p>"
+    )
+
+
+@app.get("/v1/linkedin/status", dependencies=[Depends(require_auth)])
+async def linkedin_status() -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "configured": _linkedin_ready(),
+        "authorized": False,
+        "redirect_uri": LINKEDIN_REDIRECT_URI,
+    }
+    if not LINKEDIN_TOKEN_PATH.is_file():
+        return result
+    try:
+        record = json.loads(LINKEDIN_TOKEN_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        result["token_file_valid"] = False
+        return result
+    expires_at = int(record.get("expires_at") or 0)
+    result.update(
+        {
+            "authorized": bool(record.get("access_token") and record.get("person_urn")),
+            "token_file_valid": True,
+            "name": record.get("name") or "",
+            "expires_at": expires_at,
+            "expired": bool(expires_at and expires_at <= int(time.time())),
+            "refresh_available": bool(record.get("refresh_token")),
+        }
+    )
+    return result
 
 
 @app.post("/v1/runs", response_model=RunResponse, dependencies=[Depends(require_auth)])
