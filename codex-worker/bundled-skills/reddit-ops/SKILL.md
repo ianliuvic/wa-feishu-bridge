@@ -1,6 +1,6 @@
 ---
 name: reddit-ops
-description: Operate the persistent Coolify Reddit browser for manual login, account-state checks, Reddit research, screenshots, and explicitly approved public-community joins. Do not publish, comment, vote, or send DMs.
+description: Operate the persistent Coolify Reddit browser for manual login, account-state checks, Reddit research, screenshots, and explicitly approved joins of non-private communities. Do not publish, comment, vote, or send DMs.
 ---
 
 # Reddit Ops
@@ -42,7 +42,7 @@ Inspect membership without changing it:
 python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py community ecommerce
 ```
 
-Join a public community only after the user explicitly approves that exact subreddit. The confirmation flag is mandatory and the service verifies membership afterward:
+Join a public or restricted community only after the user explicitly approves that exact subreddit. Private communities are blocked. The confirmation flag is mandatory and the service verifies membership afterward:
 
 ```bash
 python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py join ecommerce --confirm
