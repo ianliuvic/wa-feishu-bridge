@@ -1,0 +1,4 @@
+interface:
+  display_name: "Shopify Analytics"
+  short_description: "Analyze Shopify commerce and storefront performance."
+  default_prompt: "Analyze the Shopify store and produce an evidence-based business report with prioritized actions."

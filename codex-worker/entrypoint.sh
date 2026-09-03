@@ -1,11 +1,12 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /root/.codex/skills/marketing-scheduler /root/.codex/skills/playwright-browser /root/.codex/skills/google-ads /root/.codex/skills/hongxiu-weekly-product-email /workspace /workspace/codex-artifacts /browser-data/profile
+mkdir -p /root/.codex/skills/marketing-scheduler /root/.codex/skills/playwright-browser /root/.codex/skills/google-ads /root/.codex/skills/hongxiu-weekly-product-email /root/.codex/skills/shopify-analytics /workspace /workspace/codex-artifacts /browser-data/profile
 cp -R /opt/codex-worker/bundled-skills/marketing-scheduler/. /root/.codex/skills/marketing-scheduler/
 cp -R /opt/codex-worker/bundled-skills/playwright-browser/. /root/.codex/skills/playwright-browser/
 cp -R /opt/codex-worker/bundled-skills/google-ads/. /root/.codex/skills/google-ads/
 cp -R /opt/codex-worker/bundled-skills/hongxiu-weekly-product-email/. /root/.codex/skills/hongxiu-weekly-product-email/
+cp -R /opt/codex-worker/bundled-skills/shopify-analytics/. /root/.codex/skills/shopify-analytics/
 
 if ! grep -q '^\[mcp_servers\.playwright\]' /root/.codex/config.toml 2>/dev/null; then
     cat >>/root/.codex/config.toml <<'EOF'
