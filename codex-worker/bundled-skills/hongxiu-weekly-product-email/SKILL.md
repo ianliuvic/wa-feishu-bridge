@@ -22,6 +22,7 @@ The script treats a product as eligible only when the collector confirms all of 
 - A campaign slug is stable per ISO week. If the repository already records a Zoho draft key for that week, do not create another draft or rewrite its imported content.
 - If the week contains no eligible products, do not create or deploy HTML and do not create a Zoho campaign; send only the no-products Feishu notification.
 - Keep `$[FNAME|friend]$` and `$[LI:UNSUBSCRIBE]$` in every email.
+- Use the canonical footer returned by `render_footer()` in the bundled script. It must stay visually and textually aligned with `https://email.wearhongxiu.com/campaigns/2026-08-wholesale-swimwear/`: Hongxiu Clothing Co., Ltd.; `10-8A Tiexi Rd, Xingcheng, Liaoning, China`; wearhongxiu.com; service@wearhongxiu.com; WhatsApp `+86 177 1101 4152`; Privacy, Shipping, Refund, and Zoho unsubscribe links. Do not substitute an older phone number or shorten this footer.
 - Keep the hosted email table-based, mobile-friendly, and limited to publicly accessible wearhongxiu image and product URLs.
 - Never print tokens, OAuth secrets, API keys, or complete credential responses.
 

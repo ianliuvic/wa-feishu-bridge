@@ -184,9 +184,24 @@ def render_products(products: list[dict[str, Any]]) -> str:
     return "\n".join(rows)
 
 
+def render_footer() -> str:
+    """Return the canonical footer shared with the wholesale swimwear campaign."""
+    return '''<!-- ============ FOOTER ============ -->
+<tr>
+<td class="hm-card hm-px" style="background-color:#f4f4f5;padding:32px 40px;border:1px solid #dedee2;">
+<p style="margin:0 0 6px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#171719;">Hongxiu Clothing Co., Ltd.</p>
+<p class="hm-muted" style="margin:0 0 4px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.7;color:#5f6065;">10-8A Tiexi Rd, Xingcheng, Liaoning, China &nbsp;&middot;&nbsp; <a href="https://wearhongxiu.com" target="_blank" style="color:#a02025;font-weight:700;text-decoration:underline;text-underline-offset:3px;">wearhongxiu.com</a></p>
+<p class="hm-muted" style="margin:0 0 16px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;color:#5f6065;"><a href="mailto:service@wearhongxiu.com" style="color:#5f6065;text-decoration:underline;text-underline-offset:3px;">service@wearhongxiu.com</a> &nbsp;&middot;&nbsp; <a href="https://wa.me/8617711014152" target="_blank" style="color:#5f6065;text-decoration:underline;text-underline-offset:3px;">WhatsApp +86 177 1101 4152</a></p>
+<p class="hm-faint" style="margin:0 0 14px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:11px;line-height:2;color:#8a8b90;"><a href="https://wearhongxiu.com/privacy-policy-2/" target="_blank" style="color:#8a8b90;text-decoration:underline;text-underline-offset:3px;">Privacy</a> &nbsp;&middot;&nbsp; <a href="https://wearhongxiu.com/shipping-policy/" target="_blank" style="color:#8a8b90;text-decoration:underline;text-underline-offset:3px;">Shipping</a> &nbsp;&middot;&nbsp; <a href="https://wearhongxiu.com/refund-policy/" target="_blank" style="color:#8a8b90;text-decoration:underline;text-underline-offset:3px;">Refund</a></p>
+<p class="hm-faint" style="margin:0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:11px;line-height:1.8;color:#8a8b90;">You are receiving this email because you contacted Hongxiu Clothing. If you&rsquo;d rather not hear from us, you can <a href="$[LI:UNSUBSCRIBE]$" style="color:#8a8b90;text-decoration:underline;text-underline-offset:3px;">unsubscribe here</a>.</p>
+</td>
+</tr>'''
+
+
 def render_email(week: Week, products: list[dict[str, Any]]) -> str:
     count = len(products)
     product_rows = render_products(products)
+    footer = render_footer()
     return f'''<!DOCTYPE html>
 <!-- WEEKLY:{week.slug} -->
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
@@ -201,7 +216,7 @@ def render_email(week: Week, products: list[dict[str, Any]]) -> str:
 <tr><td align="center" class="px" style="padding:50px 48px 18px;"><p style="margin:0 0 12px;font:700 12px/18px Arial,sans-serif;letter-spacing:2px;text-transform:uppercase;color:#9B1B2E;">Weekly New Arrivals · {week.label}</p><h1 style="margin:0 0 18px;font:normal 39px/45px Georgia,serif;color:#1F1D1A;">Fresh silhouettes for your next collection.</h1><p style="margin:0;font:15px/24px Arial,sans-serif;color:#625D55;">Hi $[FNAME|friend]$, this week we added {count} new swimwear styles to the Hongxiu catalog. Explore production-ready options for wholesale sampling, private labeling, and collection development.</p></td></tr>
 <tr><td class="px" style="padding:30px 32px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{product_rows}</table></td></tr>
 <tr><td align="center" class="px" style="padding:14px 40px 50px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#9B1B2E" style="border-radius:6px;"><a href="https://wearhongxiu.com/new-arrivals/" target="_blank" style="display:inline-block;padding:15px 30px;font:700 14px/20px Arial,sans-serif;color:#FFF;">Explore New Arrivals</a></td></tr></table></td></tr>
-<tr><td class="px" style="background:#F1EDE5;padding:30px 40px;text-align:center;"><p style="margin:0 0 8px;font:700 12px/18px Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#9B1B2E;">Hongxiu Clothing Co., Ltd.</p><p style="margin:0 0 15px;font:13px/20px Arial,sans-serif;color:#4A463F;"><a href="https://wearhongxiu.com" style="color:#9B1B2E;">wearhongxiu.com</a> · service@wearhongxiu.com · +86 191-6891-9352</p><p style="margin:0;font:11px/18px Arial,sans-serif;color:#817B72;">You are receiving this email because you contacted Hongxiu Clothing. <a href="$[LI:UNSUBSCRIBE]$" style="color:#817B72;text-decoration:underline;">Unsubscribe here</a>.</p></td></tr>
+{footer}
 </table></td></tr></table></body></html>'''
 
 
