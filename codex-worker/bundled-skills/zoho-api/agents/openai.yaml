@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zoho API"
+  short_description: "通过 REST API 操作 Zoho Mail/CRM/Campaigns（含中国区）"
+  default_prompt: "Use $zoho-api to list unread emails from my Zoho Mail inbox via the API."
