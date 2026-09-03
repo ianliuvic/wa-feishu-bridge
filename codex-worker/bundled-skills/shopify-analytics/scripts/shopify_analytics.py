@@ -98,7 +98,11 @@ def collect_pod_designs(as_of: date, artifact_dir: str) -> dict:
         })
         request = Request(
             f"{api_url}/internal/designs?{query}",
-            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0 (compatible; HongxiuAnalytics/1.0; +https://shop.wearhongxiu.com)",
+            },
         )
         payload = request_json(request, timeout=90)
         page = payload.get("designs")
