@@ -48,6 +48,11 @@ def main() -> None:
     commands.add_parser("open-login")
     nav = commands.add_parser("navigate")
     nav.add_argument("url")
+    community = commands.add_parser("community")
+    community.add_argument("name")
+    join = commands.add_parser("join")
+    join.add_argument("name")
+    join.add_argument("--confirm", action="store_true", required=True)
     snap = commands.add_parser("snapshot")
     snap.add_argument("--text-limit", type=int, default=30000)
     snap.add_argument("--link-limit", type=int, default=200)
@@ -62,6 +67,15 @@ def main() -> None:
         result = request("POST", "/api/browser/open-login", {})
     elif args.command == "navigate":
         result = request("POST", "/api/browser/navigate", {"url": args.url})
+    elif args.command == "community":
+        result = request("GET", f"/api/reddit/communities/{quote(args.name.removeprefix('r/'))}")
+    elif args.command == "join":
+        name = args.name.removeprefix("r/")
+        result = request(
+            "POST",
+            f"/api/reddit/communities/{quote(name)}/join",
+            {"approval": f"JOIN r/{name}"},
+        )
     elif args.command == "snapshot":
         query = urlencode({"textLimit": args.text_limit, "linkLimit": args.link_limit})
         result = request("GET", f"/api/page/snapshot?{query}")

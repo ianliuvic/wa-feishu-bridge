@@ -1,6 +1,6 @@
 ---
 name: reddit-ops
-description: Operate the persistent Coolify Reddit browser for manual login, account-state checks, Reddit navigation, DOM/text snapshots, and screenshots. Use for Reddit research and browser diagnostics; do not publish, comment, vote, or send DMs without a separately implemented approval workflow.
+description: Operate the persistent Coolify Reddit browser for manual login, account-state checks, Reddit research, screenshots, and explicitly approved public-community joins. Do not publish, comment, vote, or send DMs.
 ---
 
 # Reddit Ops
@@ -36,11 +36,24 @@ python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py screenshot
 python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py screenshot --full-page
 ```
 
+Inspect membership without changing it:
+
+```bash
+python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py community ecommerce
+```
+
+Join a public community only after the user explicitly approves that exact subreddit. The confirmation flag is mandatory and the service verifies membership afterward:
+
+```bash
+python3 /root/.codex/skills/reddit-ops/scripts/reddit_ops.py join ecommerce --confirm
+```
+
 ## Safety and account handling
 
 - Google credentials, MFA codes, CAPTCHA responses, and recovery prompts must be entered by the user in noVNC. Never request that they be placed in environment variables or chat.
 - Never attempt CAPTCHA bypass, fingerprint spoofing, proxy rotation, mass account creation, or other anti-abuse evasion.
 - Treat `authenticated: false` as requiring human login; do not loop login attempts.
-- Initial release is read-only. Do not post, comment, vote, join communities, or send messages using browser improvisation. Those actions require explicit endpoints and a human approval workflow.
+- Joining is allowed only through the dedicated `join` command after the user approves the exact subreddit. Do not infer approval from a general Reddit research request.
+- Do not post, comment, vote, leave communities, or send messages using browser improvisation. Those actions require dedicated endpoints and a separate human approval workflow.
 - Respect subreddit rules, Reddit platform rules, and rate limits. Prefer useful participation and research over repetitive promotion.
 - Never print `REDDIT_OPS_API_KEY`. The script reads `REDDIT_OPS_URL` and `REDDIT_OPS_API_KEY` from the environment.
