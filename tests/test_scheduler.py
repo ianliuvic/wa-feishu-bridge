@@ -38,6 +38,28 @@ class SchedulerStoreTests(unittest.TestCase):
 
     def test_chat_session_mapping(self):
         self.assertIsNone(self.store.get_session("oc_1"))
+
+    def test_update_preserves_identity_and_run_history(self):
+        task = self.store.create_task(
+            name="daily report",
+            prompt="complete days",
+            cron="30 8 * * *",
+            timezone_name="Asia/Shanghai",
+            chat_id="oc_marketing",
+        )
+        updated = self.store.update_task(
+            task.id,
+            name=task.name,
+            prompt="include today through run time",
+            cron=task.cron,
+            timezone_name=task.timezone,
+            chat_id=task.chat_id,
+        )
+        self.assertEqual(updated.id, task.id)
+        self.assertEqual(updated.prompt, "include today through run time")
+        self.assertEqual(updated.created_at, task.created_at)
+        self.assertTrue(updated.enabled)
+        self.assertIsNotNone(updated.next_run_at)
         self.store.set_session("oc_1", "session-a")
         self.assertEqual(self.store.get_session("oc_1"), "session-a")
         self.store.set_session("oc_1", "session-b")

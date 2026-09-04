@@ -21,6 +21,9 @@ python3 /root/.codex/skills/marketing-scheduler/scripts/scheduler_api.py create 
   --cron "0 10 * * *" \
   --timezone "Asia/Shanghai" \
   --prompt "每天围绕当前营销主题创建一条广告文案和配图，发回飞书审核"
+python3 /root/.codex/skills/marketing-scheduler/scripts/scheduler_api.py update \
+  --id TASK_ID --name "每日广告素材" --cron "0 10 * * *" \
+  --timezone "Asia/Shanghai" --prompt "更新后的任务" --chat-id CHAT_ID
 python3 /root/.codex/skills/marketing-scheduler/scripts/scheduler_api.py pause --id TASK_ID
 python3 /root/.codex/skills/marketing-scheduler/scripts/scheduler_api.py resume --id TASK_ID
 python3 /root/.codex/skills/marketing-scheduler/scripts/scheduler_api.py run --id TASK_ID

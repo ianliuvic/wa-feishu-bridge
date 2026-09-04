@@ -47,6 +47,14 @@ def main() -> None:
     create.add_argument("--prompt", required=True)
     create.add_argument("--chat-id")
 
+    update = sub.add_parser("update")
+    update.add_argument("--id", required=True)
+    update.add_argument("--name", required=True)
+    update.add_argument("--cron", required=True)
+    update.add_argument("--timezone", required=True)
+    update.add_argument("--prompt", required=True)
+    update.add_argument("--chat-id", required=True)
+
     for action in ("pause", "resume", "run", "delete"):
         command = sub.add_parser(action)
         command.add_argument("--id", required=True)
@@ -58,6 +66,18 @@ def main() -> None:
         result = request(
             "POST",
             "/api/scheduler/tasks",
+            {
+                "name": args.name,
+                "cron": args.cron,
+                "timezone": args.timezone,
+                "prompt": args.prompt,
+                "chat_id": args.chat_id,
+            },
+        )
+    elif args.command == "update":
+        result = request(
+            "PUT",
+            f"/api/scheduler/tasks/{args.id}",
             {
                 "name": args.name,
                 "cron": args.cron,

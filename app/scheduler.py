@@ -146,6 +146,25 @@ class SchedulerStore:
             ).fetchall()
         return [self._task(row) for row in rows]
 
+    def update_task(
+        self, task_id: str, *, name: str, prompt: str, cron: str,
+        timezone_name: str, chat_id: str
+    ) -> ScheduledTask:
+        task = self.get_task(task_id)
+        run_at = next_run(cron, timezone_name) if task.enabled else None
+        now = utc_text(utc_now())
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE scheduled_tasks
+                SET name=?,prompt=?,cron=?,timezone=?,chat_id=?,next_run_at=?,updated_at=?
+                WHERE id=?""",
+                (
+                    name, prompt, cron, timezone_name, chat_id,
+                    utc_text(run_at) if run_at else None, now, task_id,
+                ),
+            )
+        return self.get_task(task_id)
+
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self.get_task(task_id)
         now = utc_now()

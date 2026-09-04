@@ -149,6 +149,14 @@ class ScheduledTaskCreate(BaseModel):
     chat_id: str | None = None
 
 
+class ScheduledTaskUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=200_000)
+    cron: str = Field(min_length=5, max_length=200)
+    timezone: str = Field(min_length=1, max_length=100)
+    chat_id: str = Field(min_length=1)
+
+
 def require_scheduler_auth(authorization: str | None = Header(default=None)) -> None:
     if not SCHEDULER_API_TOKEN:
         raise HTTPException(status_code=503, detail="SCHEDULER_API_TOKEN is not configured")
@@ -642,6 +650,23 @@ async def create_scheduled_task(body: ScheduledTaskCreate):
             cron=body.cron.strip(),
             timezone_name=body.timezone.strip(),
             chat_id=chat_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return task.as_dict()
+
+
+@app.put("/api/scheduler/tasks/{task_id}", dependencies=[Depends(require_scheduler_auth)])
+async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
+    _task_or_404(task_id)
+    try:
+        task = scheduler_store.update_task(
+            task_id,
+            name=body.name.strip(),
+            prompt=body.prompt.strip(),
+            cron=body.cron.strip(),
+            timezone_name=body.timezone.strip(),
+            chat_id=body.chat_id.strip(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

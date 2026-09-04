@@ -27,6 +27,18 @@ Use `probe` only for a connectivity check:
 python3 /root/.codex/skills/shopify-analytics/scripts/shopify_analytics.py probe
 ```
 
+For an 08:30 daily report that must also include today's live activity, run:
+
+```bash
+python3 /root/.codex/skills/shopify-analytics/scripts/shopify_analytics.py daily --include-current-day
+```
+
+This preserves all complete-day comparison windows and adds `today_to_now`, covering
+00:00 in `Asia/Shanghai` through the actual collection time. It also writes a separate
+`pod-designs-YYYY-MM-DD-through-HHMM.json` snapshot for the same partial-day window.
+Never compare the partial current day directly with a full prior day without clearly
+labeling the unequal observation windows.
+
 ## Daily report standard
 
 Base daily reporting on complete store-calendar days. Compare:

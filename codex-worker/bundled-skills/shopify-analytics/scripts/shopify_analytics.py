@@ -83,9 +83,14 @@ def pod_day_bounds(as_of: date) -> tuple[datetime, datetime]:
     return until - timedelta(days=1), until
 
 
-def collect_pod_designs(as_of: date, artifact_dir: str) -> dict:
+def collect_pod_designs(as_of: date, artifact_dir: str, current_day: bool = False) -> dict:
     api_url, token = pod_config()
-    since, until = pod_day_bounds(as_of)
+    if current_day:
+        zone = ZoneInfo(DEFAULT_TIMEZONE)
+        until = datetime.now(zone)
+        since = datetime.combine(as_of, datetime.min.time(), zone)
+    else:
+        since, until = pod_day_bounds(as_of)
     records: list[dict] = []
     total: int | None = None
     offset = 0
@@ -120,10 +125,11 @@ def collect_pod_designs(as_of: date, artifact_dir: str) -> dict:
         raise RuntimeError(f"POD API pagination incomplete: expected {total or 0}, received {len(records)}")
 
     cleaned_records, redactions = redact_personal_data(records)
-    day = (as_of - timedelta(days=1)).isoformat()
+    day = as_of.isoformat() if current_day else (as_of - timedelta(days=1)).isoformat()
     output_dir = Path(artifact_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    artifact = output_dir / f"pod-designs-{day}.json"
+    suffix = f"-through-{until.strftime('%H%M')}" if current_day else ""
+    artifact = output_dir / f"pod-designs-{day}{suffix}.json"
     export = {
         "schema": "hongxiu-pod-design-export-v1",
         "period": {"since": since.isoformat(), "until": until.isoformat(), "timezone": DEFAULT_TIMEZONE},
@@ -219,7 +225,7 @@ def period(start: date, end: date) -> str:
     return f"SINCE {start.isoformat()} UNTIL {end.isoformat()}"
 
 
-def build_queries(as_of: date) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+def build_queries(as_of: date, include_current_day: bool = False) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
     end = as_of - timedelta(days=1)
     periods = {
         "yesterday": {"start": end, "end": end},
@@ -229,6 +235,8 @@ def build_queries(as_of: date) -> tuple[dict[str, dict[str, str]], dict[str, str
         "last_30_days": {"start": end - timedelta(days=29), "end": end},
         "previous_30_days": {"start": end - timedelta(days=59), "end": end - timedelta(days=30)},
     }
+    if include_current_day:
+        periods["today_to_now"] = {"start": as_of, "end": as_of}
     serialized = {
         name: {"start": value["start"].isoformat(), "end": value["end"].isoformat()}
         for name, value in periods.items()
@@ -311,10 +319,13 @@ def build_queries(as_of: date) -> tuple[dict[str, dict[str, str]], dict[str, str
     return serialized, queries
 
 
-def run_report(config: dict[str, str], token: str, scopes: set[str], as_of: date) -> dict:
+def run_report(
+    config: dict[str, str], token: str, scopes: set[str], as_of: date,
+    include_current_day: bool = False,
+) -> dict:
     if "read_reports" not in scopes:
         raise RuntimeError("the refreshed token does not include read_reports")
-    periods, queries = build_queries(as_of)
+    periods, queries = build_queries(as_of, include_current_day)
     fields = " ".join(ql_field(alias, query) for alias, query in queries.items())
     payload = graphql(config, token, f"query ShopifyDailyAnalytics {{ {fields} }}")
     if payload.get("errors"):
@@ -338,6 +349,8 @@ def run_report(config: dict[str, str], token: str, scopes: set[str], as_of: date
         "api_version": config["api_version"],
         "read_reports_granted": True,
         "periods": periods,
+        "current_day_is_partial": include_current_day,
+        "current_day_cutoff": datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).isoformat() if include_current_day else None,
         "sections": sections,
     }
 
@@ -356,6 +369,10 @@ def main() -> None:
     daily = subparsers.add_parser("daily", help="collect Shopify analytics and the previous day's POD designs")
     daily.add_argument("--as-of", help="report run date in YYYY-MM-DD; defaults to Asia/Shanghai today")
     daily.add_argument("--artifact-dir", default=DEFAULT_ARTIFACT_DIR)
+    daily.add_argument(
+        "--include-current-day", action="store_true",
+        help="also collect today's live data from 00:00 through execution time",
+    )
     pod = subparsers.add_parser("pod-designs", help="export the previous complete day's POD design JSON")
     pod.add_argument("--as-of", help="report run date in YYYY-MM-DD; defaults to Asia/Shanghai today")
     pod.add_argument("--artifact-dir", default=DEFAULT_ARTIFACT_DIR)
@@ -379,8 +396,12 @@ def main() -> None:
         elif args.command == "report":
             result = run_report(config, token, scopes, as_of)
         elif args.command == "daily":
-            result = run_report(config, token, scopes, as_of)
+            result = run_report(config, token, scopes, as_of, args.include_current_day)
             result["pod_designs"] = collect_pod_designs(as_of, args.artifact_dir)
+            if args.include_current_day:
+                result["pod_designs_today_to_now"] = collect_pod_designs(
+                    as_of, args.artifact_dir, current_day=True
+                )
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (RuntimeError, ValueError) as exc:
         fail(str(exc))
