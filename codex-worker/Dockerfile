@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git jq python3 python3-pip ffmpeg nginx \
+    && apt-get install -y --no-install-recommends ca-certificates curl git jq python3 python3-pip python-is-python3 ffmpeg nginx \
     && rm -rf /var/lib/apt/lists/*
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN npm install -g @openai/codex@latest @playwright/mcp@0.0.79 \

@@ -3,6 +3,9 @@ set -eu
 
 mkdir -p /root/.codex/skills/crun-agent-skills /workspace/canvas /workspace/.infinite-canvas /workspace/codex-artifacts/crun
 cp -R /opt/codex-worker/bundled-skills/crun-agent-skills/. /root/.codex/skills/crun-agent-skills/
+if ! command -v python >/dev/null 2>&1; then
+    ln -s "$(command -v python3)" /usr/local/bin/python
+fi
 
 # Preserve the browser MCP bootstrapping installed on the existing worker.
 for script in /etc/profile.d/zz-playwright-browser.sh /etc/profile.d/zzz-playwright-browser-runtime-v2.sh; do
