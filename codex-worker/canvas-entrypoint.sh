@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /root/.codex/skills /workspace/canvas /workspace/.infinite-canvas /workspace/codex-artifacts
+mkdir -p /root/.codex/skills/crun-agent-skills /workspace/canvas /workspace/.infinite-canvas /workspace/codex-artifacts/crun
+cp -R /opt/codex-worker/bundled-skills/crun-agent-skills/. /root/.codex/skills/crun-agent-skills/
 
 # Preserve the browser MCP bootstrapping installed on the existing worker.
 for script in /etc/profile.d/zz-playwright-browser.sh /etc/profile.d/zzz-playwright-browser-runtime-v2.sh; do

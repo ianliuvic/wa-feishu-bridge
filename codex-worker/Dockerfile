@@ -12,7 +12,8 @@ RUN /usr/local/lib/node_modules/@playwright/mcp/node_modules/.bin/playwright ins
 RUN pip3 install --break-system-packages --no-cache-dir \
     fastapi==0.115.6 \
     uvicorn==0.32.1 \
-    google-ads-mcp==0.0.1
+    google-ads-mcp==0.0.1 \
+    pillow
 
 # Build the remote-capable Canvas Agent. It runs beside the existing exec worker
 # and therefore shares the same CODEX_HOME, credentials, skills, and workspace.
