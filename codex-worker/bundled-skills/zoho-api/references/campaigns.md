@@ -18,6 +18,7 @@
 | Create campaign | `/createCampaign` | POST |
 | Send campaign | `/sendcampaign` | POST |
 | Clone campaign | `/cloneCampaign` | POST |
+| Delete draft campaign | `/deletecampaign` | GET (China v1.1) |
 | Campaign reports | `/campaignreports` | GET |
 | Campaign summary | `/campaignsummary` | GET |
 | Templates | `/templates` | GET |

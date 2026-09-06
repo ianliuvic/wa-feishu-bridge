@@ -3,6 +3,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 
@@ -54,6 +55,18 @@ class WeeklyProductEmailTests(unittest.TestCase):
         self.assertNotEqual(
             weekly.products_fingerprint(products), weekly.products_fingerprint(list(reversed(products)))
         )
+
+    def test_delete_draft_uses_china_v11_get_endpoint(self):
+        with patch.object(weekly, "zoho_campaign_status", return_value="Draft"), patch.object(
+            weekly, "zoho_access_token", return_value="token"
+        ), patch.object(
+            weekly, "request_json", return_value={"code": "0", "status": "success"}
+        ) as request_json:
+            weekly.delete_zoho_draft("campaign-key")
+        method, url = request_json.call_args.args[:2]
+        self.assertEqual(method, "GET")
+        self.assertIn("/deletecampaign?", url)
+        self.assertIn("campaignkey=campaign-key", url)
 
 
 if __name__ == "__main__":

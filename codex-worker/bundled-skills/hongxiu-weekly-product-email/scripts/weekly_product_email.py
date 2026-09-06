@@ -406,9 +406,9 @@ def delete_zoho_draft(campaign_key: str) -> None:
         raise WorkflowError("Refusing to delete a Zoho campaign that is no longer a draft")
     region = env("ZOHO_REGION", "cn")
     base = "https://campaigns.zoho.com.cn/api/v1.1" if region == "cn" else "https://campaigns.zoho.com/api/v1.1"
-    payload = request_json("POST", f"{base}/deletecampaign",
-                           headers={"Authorization": f"Zoho-oauthtoken {zoho_access_token()}"},
-                           form={"resfmt": "JSON", "campaignkey": campaign_key})
+    query = urllib.parse.urlencode({"resfmt": "JSON", "campaignkey": campaign_key})
+    payload = request_json("GET", f"{base}/deletecampaign?{query}",
+                           headers={"Authorization": f"Zoho-oauthtoken {zoho_access_token()}"})
     if str(payload.get("code")) not in {"0", "200"} and payload.get("status") != "success":
         raise WorkflowError("Zoho did not confirm draft deletion")
 
