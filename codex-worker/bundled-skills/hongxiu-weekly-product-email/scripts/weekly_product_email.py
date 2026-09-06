@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import os
@@ -85,20 +86,26 @@ def request_json(method: str, url: str, **kwargs: Any) -> Any:
         raise WorkflowError(f"Non-JSON response from {url}: {exc}") from None
 
 
-def resolve_week(week_start: str | None) -> Week:
-    if week_start:
+def resolve_week(window_start: str | None, *, now: datetime | None = None) -> Week:
+    """Resolve a complete Sunday 09:00-to-Sunday 09:00 Shanghai window."""
+    if window_start:
         try:
-            start_date = date.fromisoformat(week_start)
+            start_date = date.fromisoformat(window_start)
         except ValueError:
-            raise WorkflowError("--week-start must use YYYY-MM-DD") from None
-        if start_date.weekday() != 0:
-            raise WorkflowError("--week-start must be a Monday in Asia/Shanghai")
+            raise WorkflowError("--window-start must use YYYY-MM-DD") from None
+        if start_date.weekday() != 6:
+            raise WorkflowError("--window-start must be a Sunday in Asia/Shanghai")
+        start = datetime.combine(start_date, datetime_time(hour=9), tzinfo=SHANGHAI)
     else:
-        today = datetime.now(SHANGHAI).date()
-        start_date = today - timedelta(days=today.weekday())
-    start = datetime.combine(start_date, datetime_time.min, tzinfo=SHANGHAI)
+        current = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+        days_since_sunday = (current.weekday() + 1) % 7
+        end_date = current.date() - timedelta(days=days_since_sunday)
+        end = datetime.combine(end_date, datetime_time(hour=9), tzinfo=SHANGHAI)
+        if current < end:
+            end -= timedelta(days=7)
+        start = end - timedelta(days=7)
     end = start + timedelta(days=7)
-    iso_year, iso_week, _ = start_date.isocalendar()
+    iso_year, iso_week, _ = (end - timedelta(seconds=1)).date().isocalendar()
     return Week(start=start, end=end, slug=f"{iso_year}-W{iso_week:02d}-new-arrivals",
                 label=f"{iso_year}-W{iso_week:02d}")
 
@@ -184,6 +191,12 @@ def render_products(products: list[dict[str, Any]]) -> str:
     return "\n".join(rows)
 
 
+def products_fingerprint(products: list[dict[str, Any]]) -> str:
+    return hashlib.sha256("\n".join(
+        str(product.get("wp_url", "")) for product in products
+    ).encode("utf-8")).hexdigest()[:16]
+
+
 def render_footer() -> str:
     """Return the canonical footer shared with the wholesale swimwear campaign."""
     return '''<!-- ============ FOOTER ============ -->
@@ -202,8 +215,10 @@ def render_email(week: Week, products: list[dict[str, Any]]) -> str:
     count = len(products)
     product_rows = render_products(products)
     footer = render_footer()
+    product_hash = products_fingerprint(products)
     return f'''<!DOCTYPE html>
 <!-- WEEKLY:{week.slug} -->
+<!-- PRODUCTS:{product_hash} -->
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hongxiu Weekly New Arrivals — {week.label}</title>
 <style>body,table,td,a{{-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}}table,td{{mso-table-lspace:0;mso-table-rspace:0}}img{{-ms-interpolation-mode:bicubic}}body{{margin:0;padding:0}}@media(max-width:620px){{.container{{width:100%!important}}.stack{{display:block!important;width:100%!important}}.px{{padding-left:24px!important;padding-right:24px!important}}}}</style></head>
@@ -265,18 +280,23 @@ def existing_zoho_key(readme: str, week: Week) -> str | None:
 
 def update_index(index: str, week: Week, products: list[dict[str, Any]]) -> str:
     marker = f"<!-- WEEKLY:{week.slug} -->"
-    if marker in index:
-        return index
     first = products[0]
     card = f'''      {marker}
       <div class="card">
         <img class="thumb" src="{html.escape(str(first['image_url']), quote=True)}" alt="Hongxiu Weekly New Arrivals {week.label}">
         <div class="body"><div class="badge">Draft</div><div class="name">Weekly New Arrivals — {week.label}</div>
           <div class="desc">{len(products)} newly listed and publicly available swimwear styles.</div>
-          <div class="meta">{week.start.date()} to {(week.end - timedelta(days=1)).date()} · campaigns/{week.slug}/</div>
+          <div class="meta">{week.start:%Y-%m-%d %H:%M} to {week.end:%Y-%m-%d %H:%M} Asia/Shanghai · campaigns/{week.slug}/</div>
           <a class="open" href="/campaigns/{week.slug}/" target="_blank">Open email page ↗</a></div>
       </div>
 '''
+    if marker in index:
+        pattern = (rf"      {re.escape(marker)}\r?\n      <div class=\"card\">.*?"
+                   rf"      </div>\r?\n(?=      <!-- WEEKLY:|    </div>)")
+        updated, count = re.subn(pattern, card, index, count=1, flags=re.DOTALL)
+        if count != 1:
+            raise WorkflowError("email-campaign index structure changed; campaign card update failed")
+        return updated
     needle = '    </div>\n\n    <div class="divider"></div>\n    <h2>How to add a new campaign</h2>'
     if needle not in index:
         raise WorkflowError("email-campaign index structure changed; campaign card insertion point not found")
@@ -368,6 +388,31 @@ def create_zoho_draft(week: Week, products: list[dict[str, Any]], content_url: s
     return str(payload["campaignKey"])
 
 
+def zoho_campaign_status(campaign_key: str) -> str:
+    region = env("ZOHO_REGION", "cn")
+    base = "https://campaigns.zoho.com.cn/api/v1.1" if region == "cn" else "https://campaigns.zoho.com/api/v1.1"
+    payload = request_json("GET", f"{base}/getcampaigndetails?{urllib.parse.urlencode({'resfmt': 'JSON', 'campaignkey': campaign_key})}",
+                           headers={"Authorization": f"Zoho-oauthtoken {zoho_access_token()}"})
+    if str(payload.get("code")) != "0" or payload.get("status") != "success":
+        raise WorkflowError("Zoho did not return campaign details")
+    status = str(payload.get("campaign_status") or "").strip()
+    if not status:
+        raise WorkflowError("Zoho campaign details did not include campaign_status")
+    return status
+
+
+def delete_zoho_draft(campaign_key: str) -> None:
+    if zoho_campaign_status(campaign_key).casefold() != "draft":
+        raise WorkflowError("Refusing to delete a Zoho campaign that is no longer a draft")
+    region = env("ZOHO_REGION", "cn")
+    base = "https://campaigns.zoho.com.cn/api/v1.1" if region == "cn" else "https://campaigns.zoho.com/api/v1.1"
+    payload = request_json("POST", f"{base}/deletecampaign",
+                           headers={"Authorization": f"Zoho-oauthtoken {zoho_access_token()}"},
+                           form={"resfmt": "JSON", "campaignkey": campaign_key})
+    if str(payload.get("code")) not in {"0", "200"} and payload.get("status") != "success":
+        raise WorkflowError("Zoho did not confirm draft deletion")
+
+
 def send_feishu(text: str) -> str:
     token_payload = request_json("POST", "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
                                  json_body={"app_id": env("FEISHU_APP_ID"),
@@ -387,7 +432,7 @@ def send_feishu(text: str) -> str:
 
 
 def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
-    week = resolve_week(args.week_start)
+    week = resolve_week(args.window_start)
     products = discover_products(week, args.limit)
     if not products:
         if args.dry_run:
@@ -412,15 +457,62 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         raise WorkflowError("Could not load README.md and index.html from email-campaign")
     prior_key = existing_zoho_key(readme, week)
     content_url = f"{env('EMAIL_CAMPAIGN_BASE_URL', 'https://email.wearhongxiu.com').rstrip('/')}/campaigns/{week.slug}/"
+    path = f"campaigns/{week.slug}/index.html"
     if prior_key:
-        message_id = send_feishu(f"Hongxiu 每周新品邮件：{week.label} 已存在 Zoho 草稿 {prior_key}，为避免重复创建，本次未改写内容。\n预览：{content_url}")
-        return {"status": "already_exists", "week": week.label, "product_count": len(products),
-                "content_url": content_url, "zoho_campaign_key": prior_key,
+        existing_content, _ = github_file(path)
+        campaign_status = zoho_campaign_status(prior_key)
+        if existing_content == rendered:
+            message_id = send_feishu(
+                f"Hongxiu 每周新品邮件：{week.label} 内容未变化，继续复用现有 Zoho {campaign_status}。\n"
+                f"统计窗口：{week.start:%Y-%m-%d %H:%M} 至 {week.end:%Y-%m-%d %H:%M}（Asia/Shanghai）\n"
+                f"符合条件商品：{len(products)} 件\n预览：{content_url}")
+            return {"status": "unchanged", "week": week.label, "window_start": iso(week.start),
+                    "window_end": iso(week.end), "product_count": len(products),
+                    "content_url": content_url, "zoho_campaign_key": prior_key,
+                    "zoho_campaign_status": campaign_status, "feishu_message_id": message_id}
+        if campaign_status.casefold() != "draft":
+            message_id = send_feishu(
+                f"Hongxiu 每周新品邮件：{week.label} 商品清单已有变化，但 Zoho Campaign 状态为 {campaign_status}，"
+                f"为避免修改已发送或已排期内容，本次已锁定且未改写。\n预览：{content_url}")
+            return {"status": "locked", "week": week.label, "window_start": iso(week.start),
+                    "window_end": iso(week.end), "product_count": len(products),
+                    "content_url": content_url, "zoho_campaign_key": prior_key,
+                    "zoho_campaign_status": campaign_status, "feishu_message_id": message_id}
+
+        updated_index = update_index(index, week, products)
+        put_github_file(path, rendered, f"Refresh {week.label} weekly new-arrivals email")
+        if updated_index != index:
+            put_github_file("index.html", updated_index, f"Refresh {week.label} weekly email index")
+        trigger_deploy()
+        wait_for_page(content_url, f"PRODUCTS:{products_fingerprint(products)}", args.deploy_timeout)
+        replacement_key = create_zoho_draft(week, products, content_url)
+        if zoho_campaign_status(prior_key).casefold() != "draft":
+            delete_zoho_draft(replacement_key)
+            raise WorkflowError("Existing Zoho campaign changed state during refresh; replacement draft was removed")
+        latest_readme, _ = github_file("README.md")
+        if latest_readme is None:
+            delete_zoho_draft(replacement_key)
+            raise WorkflowError("Could not reload README.md while refreshing Zoho draft")
+        put_github_file("README.md", update_readme(latest_readme, week, replacement_key),
+                        f"Replace Zoho draft for {week.label}")
+        cleanup_warning = ""
+        try:
+            delete_zoho_draft(prior_key)
+        except WorkflowError as exc:
+            cleanup_warning = f"；旧草稿未能自动清理：{exc}"
+        message_id = send_feishu(
+            f"Hongxiu 每周新品邮件已刷新：{week.label}\n"
+            f"统计窗口：{week.start:%Y-%m-%d %H:%M} 至 {week.end:%Y-%m-%d %H:%M}（Asia/Shanghai）\n"
+            f"符合条件商品：{len(products)} 件\n预览：{content_url}\n"
+            f"新 Zoho Campaigns 草稿：{replacement_key}{cleanup_warning}\n邮件尚未发送。")
+        return {"status": "refreshed", "week": week.label, "window_start": iso(week.start),
+                "window_end": iso(week.end), "product_count": len(products),
+                "content_url": content_url, "zoho_campaign_key": replacement_key,
+                "old_zoho_campaign_key": prior_key, "cleanup_warning": cleanup_warning,
                 "feishu_message_id": message_id}
 
     updated_index = update_index(index, week, products)
     updated_readme = update_readme(readme, week, "PENDING")
-    path = f"campaigns/{week.slug}/index.html"
     put_github_file(path, rendered, f"Add {week.label} weekly new-arrivals email")
     if updated_index != index:
         put_github_file("index.html", updated_index, f"Index {week.label} weekly email")
@@ -435,10 +527,12 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     final_readme = update_readme(latest_readme, week, zoho_key)
     put_github_file("README.md", final_readme, f"Record Zoho draft for {week.label}")
     message = (f"Hongxiu 每周新品邮件已完成：{week.label}\n"
+               f"统计窗口：{week.start:%Y-%m-%d %H:%M} 至 {week.end:%Y-%m-%d %H:%M}（Asia/Shanghai）\n"
                f"符合条件商品：{len(products)} 件\n预览：{content_url}\n"
                f"Zoho Campaigns 草稿：{zoho_key}\n邮件尚未发送。")
     message_id = send_feishu(message)
-    return {"status": "completed", "week": week.label, "product_count": len(products),
+    return {"status": "completed", "week": week.label, "window_start": iso(week.start),
+            "window_end": iso(week.end), "product_count": len(products),
             "content_url": content_url, "zoho_campaign_key": zoho_key,
             "feishu_message_id": message_id}
 
@@ -448,10 +542,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check")
     discover = sub.add_parser("discover")
-    discover.add_argument("--week-start")
+    discover.add_argument("--window-start", "--week-start", dest="window_start")
     discover.add_argument("--limit", type=int, default=24)
     run = sub.add_parser("run")
-    run.add_argument("--week-start")
+    run.add_argument("--window-start", "--week-start", dest="window_start")
     run.add_argument("--limit", type=int, default=24)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--output")
@@ -465,7 +559,7 @@ def main() -> int:
         if args.command == "check":
             result = check_config()
         elif args.command == "discover":
-            week = resolve_week(args.week_start)
+            week = resolve_week(args.window_start)
             products = discover_products(week, args.limit)
             result = {"week": week.label, "from": iso(week.start), "to": iso(week.end),
                       "count": len(products), "products": products}
