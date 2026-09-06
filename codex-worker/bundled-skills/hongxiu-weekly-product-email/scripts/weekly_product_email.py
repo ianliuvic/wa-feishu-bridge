@@ -216,9 +216,10 @@ def render_email(week: Week, products: list[dict[str, Any]]) -> str:
     product_rows = render_products(products)
     footer = render_footer()
     product_hash = products_fingerprint(products)
-    return f'''<!DOCTYPE html>
+    rendered = f'''<!DOCTYPE html>
 <!-- WEEKLY:{week.slug} -->
 <!-- PRODUCTS:{product_hash} -->
+<!-- CONTENT-VERSION:__CONTENT_VERSION__ -->
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hongxiu Weekly New Arrivals — {week.label}</title>
 <style>body,table,td,a{{-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}}table,td{{mso-table-lspace:0;mso-table-rspace:0}}img{{-ms-interpolation-mode:bicubic}}body{{margin:0;padding:0}}@media(max-width:620px){{.container{{width:100%!important}}.stack{{display:block!important;width:100%!important}}.px{{padding-left:24px!important;padding-right:24px!important}}}}</style></head>
@@ -233,6 +234,20 @@ def render_email(week: Week, products: list[dict[str, Any]]) -> str:
 <tr><td align="center" class="px" style="padding:14px 40px 50px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#9B1B2E" style="border-radius:6px;"><a href="https://wearhongxiu.com/new-arrivals/" target="_blank" style="display:inline-block;padding:15px 30px;font:700 14px/20px Arial,sans-serif;color:#FFF;">Explore New Arrivals</a></td></tr></table></td></tr>
 {footer}
 </table></td></tr></table></body></html>'''
+    content_version = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+    return rendered.replace("__CONTENT_VERSION__", content_version)
+
+
+def rendered_content_version(rendered: str) -> str:
+    match = re.search(r"<!-- CONTENT-VERSION:([a-f0-9]{16}) -->", rendered)
+    if not match:
+        raise WorkflowError("Rendered email is missing its content version marker")
+    return match.group(1)
+
+
+def versioned_content_url(content_url: str, content_version: str) -> str:
+    separator = "&" if "?" in content_url else "?"
+    return f"{content_url}{separator}{urllib.parse.urlencode({'v': content_version})}"
 
 
 def github_headers() -> dict[str, str]:
@@ -357,7 +372,8 @@ def zoho_access_token() -> str:
     return token
 
 
-def create_zoho_draft(week: Week, products: list[dict[str, Any]], content_url: str) -> str:
+def create_zoho_draft(week: Week, products: list[dict[str, Any]], content_url: str,
+                      content_version: str) -> str:
     region = env("ZOHO_REGION", "cn")
     base = "https://campaigns.zoho.com.cn/api/v1.1" if region == "cn" else "https://campaigns.zoho.com/api/v1.1"
     token = zoho_access_token()
@@ -379,7 +395,7 @@ def create_zoho_draft(week: Week, products: list[dict[str, Any]], content_url: s
         "from_email": env("ZOHO_CAMPAIGNS_FROM_EMAIL", "service@wearhongxiu.com"),
         "from_name": env("ZOHO_CAMPAIGNS_FROM_NAME", "Hongxiu Swim"),
         "subject": f"New This Week: {count} Swimwear Styles for Your Next Collection",
-        "content_url": content_url,
+        "content_url": versioned_content_url(content_url, content_version),
         "list_details": json.dumps({matches[0]["listkey"]: []}, separators=(",", ":")),
         "topicId": topic_matches[0]["topicId"],
     }, timeout=120)
@@ -393,6 +409,8 @@ def zoho_campaign_status(campaign_key: str) -> str:
     base = "https://campaigns.zoho.com.cn/api/v1.1" if region == "cn" else "https://campaigns.zoho.com/api/v1.1"
     payload = request_json("GET", f"{base}/getcampaigndetails?{urllib.parse.urlencode({'resfmt': 'JSON', 'campaignkey': campaign_key})}",
                            headers={"Authorization": f"Zoho-oauthtoken {zoho_access_token()}"})
+    if str(payload.get("code")) in {"2206", "6301"} and payload.get("status") == "error":
+        return "Missing"
     if str(payload.get("code")) != "0" or payload.get("status") != "success":
         raise WorkflowError("Zoho did not return campaign details")
     status = str(payload.get("campaign_status") or "").strip()
@@ -443,6 +461,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
                 "writes": False, "feishu_message_id": message_id}
 
     rendered = render_email(week, products)
+    content_version = rendered_content_version(rendered)
     if args.dry_run:
         output = Path(args.output or f"/workspace/codex-artifacts/{week.slug}/index.html")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -458,9 +477,11 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     prior_key = existing_zoho_key(readme, week)
     content_url = f"{env('EMAIL_CAMPAIGN_BASE_URL', 'https://email.wearhongxiu.com').rstrip('/')}/campaigns/{week.slug}/"
     path = f"campaigns/{week.slug}/index.html"
+    campaign_status = zoho_campaign_status(prior_key) if prior_key else ""
+    if campaign_status.casefold() == "missing":
+        prior_key = None
     if prior_key:
         existing_content, _ = github_file(path)
-        campaign_status = zoho_campaign_status(prior_key)
         if existing_content == rendered:
             message_id = send_feishu(
                 f"Hongxiu 每周新品邮件：{week.label} 内容未变化，继续复用现有 Zoho {campaign_status}。\n"
@@ -484,8 +505,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         if updated_index != index:
             put_github_file("index.html", updated_index, f"Refresh {week.label} weekly email index")
         trigger_deploy()
-        wait_for_page(content_url, f"PRODUCTS:{products_fingerprint(products)}", args.deploy_timeout)
-        replacement_key = create_zoho_draft(week, products, content_url)
+        wait_for_page(content_url, f"CONTENT-VERSION:{content_version}", args.deploy_timeout)
+        replacement_key = create_zoho_draft(week, products, content_url, content_version)
         if zoho_campaign_status(prior_key).casefold() != "draft":
             delete_zoho_draft(replacement_key)
             raise WorkflowError("Existing Zoho campaign changed state during refresh; replacement draft was removed")
@@ -519,8 +540,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     if updated_readme != readme:
         put_github_file("README.md", updated_readme, f"Register {week.label} weekly email")
     trigger_deploy()
-    wait_for_page(content_url, f"WEEKLY:{week.slug}", args.deploy_timeout)
-    zoho_key = create_zoho_draft(week, products, content_url)
+    wait_for_page(content_url, f"CONTENT-VERSION:{content_version}", args.deploy_timeout)
+    zoho_key = create_zoho_draft(week, products, content_url, content_version)
     latest_readme, _ = github_file("README.md")
     if latest_readme is None:
         raise WorkflowError("Could not reload README.md after Zoho draft creation")

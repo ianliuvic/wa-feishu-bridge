@@ -70,6 +70,31 @@ class WeeklyProductEmailTests(unittest.TestCase):
         self.assertIn("This week, we added 2 new swimwear styles", rendered)
         self.assertIn("$[LI:UNSUBSCRIBE]$", rendered)
 
+    def test_rendered_content_version_changes_with_template_content(self):
+        period = weekly.resolve_week("2026-08-30")
+        product = {
+            "title": "Test swimsuit",
+            "image_url": "https://example.test/image.webp",
+            "wp_url": "https://example.test/product/",
+            "listing_time": "2026-09-01T00:00:00Z",
+        }
+        rendered = weekly.render_email(period, [product])
+        version = weekly.rendered_content_version(rendered)
+        self.assertEqual(len(version), 16)
+        self.assertIn(f"CONTENT-VERSION:{version}", rendered)
+        self.assertEqual(
+            weekly.versioned_content_url("https://example.test/email/", version),
+            f"https://example.test/email/?v={version}",
+        )
+
+    def test_missing_zoho_campaign_is_recoverable(self):
+        with patch.object(
+            weekly,
+            "request_json",
+            return_value={"code": "2206", "status": "error"},
+        ), patch.object(weekly, "zoho_access_token", return_value="token"):
+            self.assertEqual(weekly.zoho_campaign_status("deleted-key"), "Missing")
+
     def test_delete_draft_uses_china_v11_get_endpoint(self):
         with patch.object(weekly, "zoho_campaign_status", return_value="Draft"), patch.object(
             weekly, "zoho_access_token", return_value="token"
