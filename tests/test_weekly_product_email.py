@@ -56,6 +56,20 @@ class WeeklyProductEmailTests(unittest.TestCase):
             weekly.products_fingerprint(products), weekly.products_fingerprint(list(reversed(products)))
         )
 
+    def test_rendered_email_never_uses_recipient_name(self):
+        period = weekly.resolve_week("2026-08-30")
+        product = {
+            "title": "Test swimsuit",
+            "image_url": "https://example.test/image.webp",
+            "wp_url": "https://example.test/product/",
+            "listing_time": "2026-09-01T00:00:00Z",
+        }
+        rendered = weekly.render_email(period, [product, {**product, "wp_url": "https://example.test/product-2/"}])
+        self.assertNotIn("$[FNAME", rendered)
+        self.assertNotIn("Hi ", rendered)
+        self.assertIn("This week, we added 2 new swimwear styles", rendered)
+        self.assertIn("$[LI:UNSUBSCRIBE]$", rendered)
+
     def test_delete_draft_uses_china_v11_get_endpoint(self):
         with patch.object(weekly, "zoho_campaign_status", return_value="Draft"), patch.object(
             weekly, "zoho_access_token", return_value="token"

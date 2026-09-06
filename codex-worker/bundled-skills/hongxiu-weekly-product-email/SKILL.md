@@ -22,7 +22,7 @@ The default reporting window is the complete seven-day interval from the previou
 - A campaign slug is stable per completed Sunday-to-Sunday window. Compare the newly rendered content with the hosted repository copy on every run.
 - If the content is unchanged, reuse the existing Zoho campaign. If it changed and the existing campaign is still a draft, replace it safely with one refreshed draft and update the repository key. If it is sent, in progress, or scheduled, lock it and never modify or replace it.
 - If the week contains no eligible products, do not create or deploy HTML and do not create a Zoho campaign; send only the no-products Feishu notification.
-- Keep `$[FNAME|friend]$` and `$[LI:UNSUBSCRIBE]$` in every email.
+- Never include a recipient name, recipient-name merge tag, or personalized salutation; inaccurate contact names can damage trust. Keep `$[LI:UNSUBSCRIBE]$` in every email.
 - Use the canonical footer returned by `render_footer()` in the bundled script. It must stay visually and textually aligned with `https://email.wearhongxiu.com/campaigns/2026-08-wholesale-swimwear/`: Hongxiu Clothing Co., Ltd.; `10-8A Tiexi Rd, Xingcheng, Liaoning, China`; wearhongxiu.com; service@wearhongxiu.com; WhatsApp `+86 177 1101 4152`; Privacy, Shipping, Refund, and Zoho unsubscribe links. Do not substitute an older phone number or shorten this footer.
 - Keep the hosted email table-based, mobile-friendly, and limited to publicly accessible wearhongxiu image and product URLs.
 - Never print tokens, OAuth secrets, API keys, or complete credential responses.
