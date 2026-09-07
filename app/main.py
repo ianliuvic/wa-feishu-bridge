@@ -82,6 +82,7 @@ _llm: DeepSeekClient | None = None
 _evolution: EvolutionClient | None = None
 _autoreply: AutoReplyManager | None = None
 _scheduler_loop_task: asyncio.Task | None = None
+SCHEDULER_SILENT_MARKER = "SCHEDULER_SILENT"
 
 # Feishu delivers events at-least-once (and this URL is registered for both
 # 事件配置 and 回调配置), so dedupe by event_id and by reply message_id.
@@ -417,6 +418,11 @@ async def deliver_codex_artifacts(chat_id: str, artifacts: list[dict]) -> list[s
     return notes
 
 
+def should_suppress_scheduler_notification(answer: str, artifacts: list[dict]) -> bool:
+    """Allow monitor jobs to report healthy runs without creating Feishu noise."""
+    return answer.strip() == SCHEDULER_SILENT_MARKER and not artifacts
+
+
 async def run_scheduled_task(task, run_id: str) -> None:
     artifact_dir = f"/workspace/codex-artifacts/scheduled/{task.id}/{run_id}"
     prompt = f"""这是持久化定时营销任务的一次正式执行，不是在创建新的计划任务。
@@ -430,8 +436,13 @@ async def run_scheduled_task(task, run_id: str) -> None:
     try:
         result = await call_codex(prompt, artifact_dir=artifact_dir)
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
+        raw_artifacts = result.get("artifacts") or []
+        if should_suppress_scheduler_notification(answer, raw_artifacts):
+            logger.info("scheduled task %s completed silently", task.id)
+            scheduler_store.finish_run(task.id, run_id, response=answer)
+            return
         md_only, artifacts = select_delivery_artifacts(
-            task.prompt, result.get("artifacts") or []
+            task.prompt, raw_artifacts
         )
         if md_only and not artifacts:
             raise RuntimeError("MD-only scheduled task produced no Markdown report")
