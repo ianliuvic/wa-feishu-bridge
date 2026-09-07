@@ -58,7 +58,10 @@ def main() -> None:
     snap.add_argument("--link-limit", type=int, default=200)
     shot = commands.add_parser("screenshot")
     shot.add_argument("--full-page", action="store_true")
-    shot.add_argument("--output-dir", default="/workspace/codex-artifacts")
+    shot.add_argument(
+        "--output-dir",
+        default=os.getenv("CODEX_ARTIFACT_DIR", "/workspace/codex-artifacts"),
+    )
     args = parser.parse_args()
 
     if args.command == "status":

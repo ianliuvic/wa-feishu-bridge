@@ -463,7 +463,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     rendered = render_email(week, products)
     content_version = rendered_content_version(rendered)
     if args.dry_run:
-        output = Path(args.output or f"/workspace/codex-artifacts/{week.slug}/index.html")
+        artifact_root = Path(os.getenv("CODEX_ARTIFACT_DIR", "/workspace/codex-artifacts"))
+        output = Path(args.output) if args.output else artifact_root / week.slug / "index.html"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
         return {"status": "dry_run", "week": week.label, "product_count": len(products),

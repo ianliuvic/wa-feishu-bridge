@@ -20,7 +20,7 @@ DEFAULT_SHOP = "w4ik1r-x5.myshopify.com"
 DEFAULT_API_VERSION = "2026-07"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_POD_API_URL = "https://pod-api.wearhongxiu.com"
-DEFAULT_ARTIFACT_DIR = "/workspace/codex-artifacts"
+DEFAULT_ARTIFACT_DIR = os.getenv("CODEX_ARTIFACT_DIR", "/workspace/codex-artifacts")
 POD_PAGE_SIZE = 500
 SENSITIVE_KEY = re.compile(
     r"^(?:email|phone|telephone|first_?name|last_?name|full_?name|customer_?id|address|address[12]|"
