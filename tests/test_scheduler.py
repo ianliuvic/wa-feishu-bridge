@@ -3,7 +3,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.scheduler import SchedulerStore, next_run
+from app.scheduler import (
+    MD_ONLY_DELIVERY_MARKER,
+    SchedulerStore,
+    next_run,
+    select_delivery_artifacts,
+)
 
 
 class SchedulerStoreTests(unittest.TestCase):
@@ -71,6 +76,24 @@ class SchedulerStoreTests(unittest.TestCase):
         after = datetime(2026, 8, 22, 0, 0, tzinfo=timezone.utc)
         value = next_run("0 10 * * *", "Asia/Shanghai", after)
         self.assertEqual(value, datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc))
+
+    def test_md_only_delivery_filters_json_and_scripts(self):
+        artifacts = [
+            {"name": "report.md", "path": "report.md"},
+            {"name": "data.json", "path": "data.json"},
+            {"name": "collect.py", "path": "collect.py"},
+        ]
+        md_only, selected = select_delivery_artifacts(
+            f"{MD_ONLY_DELIVERY_MARKER}\nCreate the daily report.", artifacts
+        )
+        self.assertTrue(md_only)
+        self.assertEqual(selected, [artifacts[0]])
+
+    def test_default_delivery_keeps_all_artifacts(self):
+        artifacts = [{"name": "data.json", "path": "data.json"}]
+        md_only, selected = select_delivery_artifacts("Create the report.", artifacts)
+        self.assertFalse(md_only)
+        self.assertEqual(selected, artifacts)
 
 
 if __name__ == "__main__":

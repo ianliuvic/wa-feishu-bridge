@@ -13,6 +13,22 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import croniter
 
 
+MD_ONLY_DELIVERY_MARKER = "[[SCHEDULER_DELIVERY:MD_ONLY]]"
+
+
+def select_delivery_artifacts(prompt: str, artifacts: list[dict]) -> tuple[bool, list[dict]]:
+    """Apply the delivery policy embedded in a scheduled task prompt."""
+    md_only = MD_ONLY_DELIVERY_MARKER in prompt
+    if not md_only:
+        return False, artifacts
+    selected = [
+        artifact
+        for artifact in artifacts
+        if str(artifact.get("name") or artifact.get("path") or "").lower().endswith(".md")
+    ]
+    return True, selected
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 

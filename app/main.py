@@ -61,7 +61,7 @@ from .evolution import EvolutionClient, EvolutionMessage
 from .feishu import FeishuClient
 from .llm import DeepSeekClient
 from .replymap import ReplyMap
-from .scheduler import SchedulerStore
+from .scheduler import SchedulerStore, select_delivery_artifacts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bridge")
@@ -430,7 +430,17 @@ async def run_scheduled_task(task, run_id: str) -> None:
     try:
         result = await call_codex(prompt, artifact_dir=artifact_dir)
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
-        delivery_notes = await deliver_codex_artifacts(task.chat_id, result.get("artifacts") or [])
+        md_only, artifacts = select_delivery_artifacts(
+            task.prompt, result.get("artifacts") or []
+        )
+        if md_only and not artifacts:
+            raise RuntimeError("MD-only scheduled task produced no Markdown report")
+        delivery_notes = await deliver_codex_artifacts(task.chat_id, artifacts)
+        if md_only:
+            if not any(note.startswith("- ✅") for note in delivery_notes):
+                raise RuntimeError("Markdown report could not be delivered to Feishu")
+            scheduler_store.finish_run(task.id, run_id, response=answer)
+            return
         if delivery_notes:
             answer += "\n\n附件交付：\n" + "\n".join(delivery_notes)
         await asyncio.to_thread(
