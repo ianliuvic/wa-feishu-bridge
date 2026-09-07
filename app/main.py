@@ -167,7 +167,10 @@ def require_scheduler_auth(authorization: str | None = Header(default=None)) -> 
 
 
 async def call_codex(
-    prompt: str, session_id: str | None = None, input_files: list[str] | None = None
+    prompt: str,
+    session_id: str | None = None,
+    input_files: list[str] | None = None,
+    artifact_dir: str | None = None,
 ) -> dict:
     if not CODEX_WORKER_URL or not CODEX_WORKER_TOKEN:
         raise RuntimeError("Codex worker is not configured")
@@ -178,6 +181,8 @@ async def call_codex(
         "workspace": "/workspace",
         "input_files": input_files or [],
     }
+    if artifact_dir:
+        body["artifact_dir"] = artifact_dir
     timeout = httpx.Timeout(CODEX_RUN_TIMEOUT_SECONDS + 30, connect=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(f"{CODEX_WORKER_URL}/v1/runs", json=body, headers=headers)
@@ -186,7 +191,12 @@ async def call_codex(
     return response.json()
 
 
-def _marketing_prompt(text: str, chat_id: str, inputs: list[dict] | None = None) -> str:
+def _marketing_prompt(
+    text: str,
+    chat_id: str,
+    artifact_dir: str,
+    inputs: list[dict] | None = None,
+) -> str:
     attachment_text = ""
     if inputs:
         lines = [
@@ -198,7 +208,7 @@ def _marketing_prompt(text: str, chat_id: str, inputs: list[dict] | None = None)
         )
     return f"""你正在通过飞书 marketing 群与用户对话。
 直接回答用户，不要复述本说明。需要创建、修改、暂停、恢复、立即运行或删除定时营销任务时，必须使用 marketing-scheduler skill；创建任务前确认时间、时区和任务内容。
-需要生成图片、视频、文档或其他文件时，必须把最终交付文件保存到 /workspace/codex-artifacts，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留在最终回复中。
+需要生成图片、视频、文档或其他文件时，必须把本次最终交付文件保存到 {artifact_dir}，不得保存到其他运行的目录，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留在最终回复中。
 当前飞书 chat_id: {chat_id}
 {attachment_text}
 用户消息：
@@ -308,10 +318,12 @@ async def process_marketing_message(
             upload_id, uploaded_inputs = await upload_codex_inputs(attachments)
 
         session_id = scheduler_store.get_session(chat_id)
+        artifact_dir = f"/workspace/codex-artifacts/interactive/{uuid.uuid4().hex}"
         result = await call_codex(
-            _marketing_prompt(command, chat_id, uploaded_inputs),
+            _marketing_prompt(command, chat_id, artifact_dir, uploaded_inputs),
             session_id,
             [item["path"] for item in uploaded_inputs],
+            artifact_dir,
         )
         returned_session = result.get("session_id")
         if returned_session:
@@ -406,16 +418,17 @@ async def deliver_codex_artifacts(chat_id: str, artifacts: list[dict]) -> list[s
 
 
 async def run_scheduled_task(task, run_id: str) -> None:
+    artifact_dir = f"/workspace/codex-artifacts/scheduled/{task.id}/{run_id}"
     prompt = f"""这是持久化定时营销任务的一次正式执行，不是在创建新的计划任务。
 任务名称：{task.name}
 任务时区：{task.timezone}
 请现在完成以下任务，并给出适合直接发送到飞书审核的最终结果。可按需使用已安装的 skills。
-需要生成图片、视频、文档或其他文件时，必须把最终交付文件保存到 /workspace/codex-artifacts，并在最终回复中写明文件名。外部 HTTPS 结果链接也应保留。
+需要生成图片、视频、文档或其他文件时，必须把本次最终交付文件保存到 {artifact_dir}，不得保存到公共根目录或其他任务目录，并在最终回复中写明文件名。若下方任务说明或脚本仍写着 /workspace/codex-artifacts，请把它理解为本次独占目录 {artifact_dir}，并通过脚本的输出目录参数或执行后的复制操作确保最终文件位于该目录。外部 HTTPS 结果链接也应保留。
 
 {task.prompt}
 """
     try:
-        result = await call_codex(prompt)
+        result = await call_codex(prompt, artifact_dir=artifact_dir)
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
         delivery_notes = await deliver_codex_artifacts(task.chat_id, result.get("artifacts") or [])
         if delivery_notes:

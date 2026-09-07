@@ -168,6 +168,7 @@ class RunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=200_000)
     session_id: str | None = None
     workspace: str | None = None
+    artifact_dir: str | None = Field(default=None, max_length=500)
     ephemeral: bool = False
     input_files: list[str] = Field(default_factory=list, max_length=20)
 
@@ -202,6 +203,31 @@ def _resolve_workspace(value: str | None) -> Path:
         raise HTTPException(status_code=400, detail="workspace must be inside CODEX_WORKSPACE")
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
+
+
+def _resolve_artifact_root(workspace: Path, value: str | None) -> Path:
+    """Resolve a run-owned artifact directory below ``codex-artifacts``.
+
+    Older API callers may omit ``artifact_dir`` and retain the legacy shared
+    directory behaviour. Bridge callers always provide a unique directory so
+    concurrent runs cannot claim one another's files.
+    """
+    shared_root = (workspace / "codex-artifacts").resolve()
+    if not value:
+        artifact_root = shared_root
+    else:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            artifact_root = candidate.resolve()
+        else:
+            artifact_root = (workspace / candidate).resolve()
+        if artifact_root == shared_root or shared_root not in artifact_root.parents:
+            raise HTTPException(
+                status_code=400,
+                detail="artifact_dir must be a run-owned directory inside codex-artifacts",
+            )
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    return artifact_root
 
 
 def _resolve_input_file(value: str) -> Path:
@@ -247,8 +273,7 @@ def _extract_result(stdout: str) -> tuple[str | None, str]:
 async def _execute(req: RunRequest) -> RunResponse:
     started_at = time.monotonic()
     workspace = _resolve_workspace(req.workspace)
-    artifact_root = workspace / "codex-artifacts"
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_root = _resolve_artifact_root(workspace, req.artifact_dir)
     before = {
         path.resolve(): (path.stat().st_mtime_ns, path.stat().st_size)
         for path in artifact_root.rglob("*")
@@ -276,11 +301,22 @@ async def _execute(req: RunRequest) -> RunResponse:
         mime_type = mimetypes.guess_type(path.name)[0] or ""
         if mime_type.startswith("image/"):
             image_args.extend(["--image", str(path)])
+    run_prompt = req.prompt
+    if req.artifact_dir:
+        run_prompt += (
+            "\n\nSYSTEM ARTIFACT ISOLATION REQUIREMENT: This run has an exclusive output "
+            f"directory: {artifact_root}. Save or copy every file intended for delivery "
+            "into that exact directory, including files produced by scripts with older "
+            "defaults. Do not place deliverable files directly in the shared "
+            "/workspace/codex-artifacts root. In the final response, reference the files "
+            "from the exclusive directory."
+        )
+
     resumed = bool(req.session_id)
     if req.session_id:
-        command = [*base, "resume", *image_args, req.session_id, req.prompt]
+        command = [*base, "resume", *image_args, req.session_id, run_prompt]
     else:
-        command = [*base, *image_args, "--", req.prompt] if image_args else [*base, req.prompt]
+        command = [*base, *image_args, "--", run_prompt] if image_args else [*base, run_prompt]
 
     logger.info(
         "starting Codex run resumed=%s workspace=%s inputs=%s images=%s",
@@ -289,11 +325,14 @@ async def _execute(req: RunRequest) -> RunResponse:
         len(input_paths),
         len(image_args) // 2,
     )
+    process_env = os.environ.copy()
+    process_env["CODEX_ARTIFACT_DIR"] = str(artifact_root)
+    process_env["CODEX_RUN_ARTIFACT_DIR"] = str(artifact_root)
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
+        env=process_env,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
