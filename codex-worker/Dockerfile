@@ -17,7 +17,11 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 
 # Build the remote-capable Canvas Agent. It runs beside the existing exec worker
 # and therefore shares the same CODEX_HOME, credentials, skills, and workspace.
-RUN git clone --depth 1 https://github.com/ianliuvic/infinite-canvas.git /opt/infinite-canvas \
+ARG INFINITE_CANVAS_REF=71ccfe8f53e401c8510ec159e851014a5d3ffe10
+RUN git clone --filter=blob:none --no-checkout https://github.com/ianliuvic/infinite-canvas.git /opt/infinite-canvas \
+    && cd /opt/infinite-canvas \
+    && git fetch --depth 1 origin "$INFINITE_CANVAS_REF" \
+    && git checkout --detach FETCH_HEAD \
     && cd /opt/infinite-canvas/canvas-agent \
     && npm install \
     && npm run build \
