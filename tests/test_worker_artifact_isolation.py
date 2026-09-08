@@ -44,6 +44,44 @@ class WorkerArtifactIsolationTests(unittest.TestCase):
             result = worker._resolve_artifact_root(workspace, None)
             self.assertEqual(result, workspace / "codex-artifacts")
 
+    def test_task_complete_error_is_extracted(self):
+        payload = {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "error": {
+                    "message": "stream disconnected before completion: stream closed before response.completed"
+                },
+            },
+        }
+        self.assertIn(
+            "stream disconnected",
+            worker._task_complete_error(__import__("json").dumps(payload)),
+        )
+
+    def test_stream_disconnect_is_retryable(self):
+        self.assertTrue(
+            worker._is_retryable_failure(
+                "stream disconnected before completion: stream closed before response.completed"
+            )
+        )
+        self.assertFalse(worker._is_retryable_failure("LinkedIn returned HTTP 401"))
+
+    def test_run_logs_are_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve()
+            relative = worker._write_run_logs(
+                workspace,
+                "task-run-attempt-1",
+                stdout="{\"type\":\"thread.started\"}\n",
+                stderr="progress\n",
+                metadata={"returncode": 1},
+            )
+            log_dir = workspace / relative
+            self.assertTrue((log_dir / "stdout.jsonl").is_file())
+            self.assertTrue((log_dir / "stderr.log").is_file())
+            self.assertTrue((log_dir / "metadata.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

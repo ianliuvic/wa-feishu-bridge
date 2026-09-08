@@ -92,6 +92,23 @@ _seen_msg_ids: deque[str] = deque(maxlen=500)
 _seen_msg_id_set: set[str] = set()
 
 
+class CodexWorkerError(RuntimeError):
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        session_id: str | None = None,
+        retryable: bool = False,
+        log_dir: str | None = None,
+    ) -> None:
+        super().__init__(f"Codex worker HTTP {status_code}: {message}")
+        self.status_code = status_code
+        self.session_id = session_id
+        self.retryable = retryable
+        self.log_dir = log_dir
+
+
 def _seen(key: str, queue: deque, seen_set: set) -> bool:
     if key in seen_set:
         return True
@@ -172,6 +189,7 @@ async def call_codex(
     session_id: str | None = None,
     input_files: list[str] | None = None,
     artifact_dir: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
     if not CODEX_WORKER_URL or not CODEX_WORKER_TOKEN:
         raise RuntimeError("Codex worker is not configured")
@@ -184,11 +202,28 @@ async def call_codex(
     }
     if artifact_dir:
         body["artifact_dir"] = artifact_dir
+    if run_id:
+        body["run_id"] = run_id
     timeout = httpx.Timeout(CODEX_RUN_TIMEOUT_SECONDS + 30, connect=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(f"{CODEX_WORKER_URL}/v1/runs", json=body, headers=headers)
     if response.status_code >= 400:
-        raise RuntimeError(f"Codex worker HTTP {response.status_code}: {response.text[:1000]}")
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or "Codex execution failed")
+            raise CodexWorkerError(
+                response.status_code,
+                message,
+                session_id=detail.get("session_id"),
+                retryable=detail.get("retryable") is True,
+                log_dir=detail.get("log_dir"),
+            )
+        message = str(detail or response.text[:1000] or "Codex execution failed")
+        raise CodexWorkerError(response.status_code, message)
     return response.json()
 
 
@@ -434,7 +469,30 @@ async def run_scheduled_task(task, run_id: str) -> None:
 {task.prompt}
 """
     try:
-        result = await call_codex(prompt, artifact_dir=artifact_dir)
+        try:
+            result = await call_codex(
+                prompt,
+                artifact_dir=artifact_dir,
+                run_id=f"{task.id}-{run_id}-attempt-1",
+            )
+        except CodexWorkerError as first_error:
+            if not (first_error.retryable and first_error.session_id):
+                raise
+            logger.warning(
+                "scheduled task %s transient Codex failure; resuming session_id=%s log_dir=%s",
+                task.id,
+                first_error.session_id,
+                first_error.log_dir,
+            )
+            recovery_prompt = f"""上一次执行的模型响应流意外中断。请从当前会话和已有文件中恢复，不要从头重做。
+本次任务的独占目录仍是 {artifact_dir}。
+先检查已经完成的外部写入和目录中的结果：已成功发布或同步的 WordPress、RAG、LinkedIn 等步骤绝对不得重复。只继续尚未完成的阶段；发布任何社媒内容前先检查本会话中是否已经返回对应 post ID。完成后给出原任务要求的最终中文报告。不要为了恢复而重新采集与剩余阶段无关的资料。"""
+            result = await call_codex(
+                recovery_prompt,
+                session_id=first_error.session_id,
+                artifact_dir=artifact_dir,
+                run_id=f"{task.id}-{run_id}-attempt-2",
+            )
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
         raw_artifacts = result.get("artifacts") or []
         if should_suppress_scheduler_notification(answer, raw_artifacts):

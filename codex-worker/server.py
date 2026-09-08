@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -169,6 +170,7 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     workspace: str | None = None
     artifact_dir: str | None = Field(default=None, max_length=500)
+    run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,160}$")
     ephemeral: bool = False
     input_files: list[str] = Field(default_factory=list, max_length=20)
 
@@ -270,9 +272,82 @@ def _extract_result(stdout: str) -> tuple[str | None, str]:
     return session_id, (messages[-1] if messages else "")
 
 
+def _task_complete_error(text: str) -> str | None:
+    """Extract the useful terminal error from a Codex session JSONL payload."""
+    for raw in reversed(text.splitlines()):
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        payload = event.get("payload") or event
+        if payload.get("type") != "task_complete":
+            continue
+        error = payload.get("error") or {}
+        message = error.get("message") if isinstance(error, dict) else error
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def _session_error(session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+    session_root = Path(os.getenv("CODEX_HOME", "/root/.codex")) / "sessions"
+    try:
+        candidates = sorted(
+            session_root.rglob(f"*{session_id}.jsonl"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        with candidates[0].open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - 256 * 1024))
+            return _task_complete_error(handle.read().decode("utf-8", errors="replace"))
+    except OSError:
+        logger.exception("failed to inspect Codex session error session_id=%s", session_id)
+        return None
+
+
+def _is_retryable_failure(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "stream disconnected before completion",
+            "stream closed before response.completed",
+            "connection reset by peer",
+            "connection closed",
+        )
+    )
+
+
+def _write_run_logs(
+    workspace: Path,
+    run_id: str,
+    *,
+    stdout: str,
+    stderr: str,
+    metadata: dict[str, Any],
+) -> str:
+    root = (workspace / "codex-run-logs" / run_id).resolve()
+    allowed = (workspace / "codex-run-logs").resolve()
+    if allowed not in root.parents:
+        raise ValueError("invalid run log path")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "stdout.jsonl").write_text(stdout, encoding="utf-8")
+    (root / "stderr.log").write_text(stderr, encoding="utf-8")
+    (root / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return root.relative_to(workspace).as_posix()
+
+
 async def _execute(req: RunRequest) -> RunResponse:
     started_at = time.monotonic()
     workspace = _resolve_workspace(req.workspace)
+    run_id = req.run_id or uuid.uuid4().hex
     artifact_root = _resolve_artifact_root(workspace, req.artifact_dir)
     before = {
         path.resolve(): (path.stat().st_mtime_ns, path.stat().st_size)
@@ -330,6 +405,7 @@ async def _execute(req: RunRequest) -> RunResponse:
     process_env["CODEX_RUN_ARTIFACT_DIR"] = str(artifact_root)
     process = await asyncio.create_subprocess_exec(
         *command,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=process_env,
@@ -345,14 +421,62 @@ async def _execute(req: RunRequest) -> RunResponse:
 
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
-    if process.returncode != 0:
-        logger.error("Codex run failed returncode=%s", process.returncode)
-        detail = (stderr or stdout or "Codex execution failed")[-4000:]
-        raise HTTPException(status_code=502, detail=detail)
-
     session_id, response = _extract_result(stdout)
     if not session_id and req.session_id:
         session_id = req.session_id
+    if process.returncode != 0:
+        message = _session_error(session_id) or _task_complete_error(stdout)
+        if not message:
+            message = (stderr or stdout or "Codex execution failed")[-4000:].strip()
+        retryable = _is_retryable_failure(message)
+        log_dir = _write_run_logs(
+            workspace,
+            run_id,
+            stdout=stdout,
+            stderr=stderr,
+            metadata={
+                "run_id": run_id,
+                "session_id": session_id,
+                "returncode": process.returncode,
+                "retryable": retryable,
+                "error": message,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            },
+        )
+        logger.error(
+            "Codex run failed run_id=%s session_id=%s returncode=%s retryable=%s log_dir=%s error=%s",
+            run_id,
+            session_id,
+            process.returncode,
+            retryable,
+            log_dir,
+            message[:500],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": message,
+                "session_id": session_id,
+                "retryable": retryable,
+                "run_id": run_id,
+                "log_dir": log_dir,
+                "returncode": process.returncode,
+            },
+        )
+
+    _write_run_logs(
+        workspace,
+        run_id,
+        stdout=stdout,
+        stderr=stderr,
+        metadata={
+            "run_id": run_id,
+            "session_id": session_id,
+            "returncode": process.returncode,
+            "retryable": False,
+            "elapsed_seconds": round(time.monotonic() - started_at, 3),
+        },
+    )
     if not response:
         raise HTTPException(status_code=502, detail="Codex returned no final message")
 
