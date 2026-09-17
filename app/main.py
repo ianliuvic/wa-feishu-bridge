@@ -502,15 +502,19 @@ async def run_scheduled_task(task, run_id: str) -> None:
         md_only, artifacts = select_delivery_artifacts(
             task.prompt, raw_artifacts
         )
-        if md_only and not artifacts:
-            raise RuntimeError("MD-only scheduled task produced no Markdown report")
-        delivery_notes = await deliver_codex_artifacts(task.chat_id, artifacts)
+        delivery_notes = (
+            await deliver_codex_artifacts(task.chat_id, artifacts) if artifacts else []
+        )
         if md_only:
-            if not any(note.startswith("- ✅") for note in delivery_notes):
-                raise RuntimeError("Markdown report could not be delivered to Feishu")
-            scheduler_store.finish_run(task.id, run_id, response=answer)
-            return
-        if delivery_notes:
+            # MD-only means "one report file instead of a pile of artefacts", not
+            # "no message": the text report still goes to the group. A missing or
+            # undeliverable report is logged rather than failing a run whose text
+            # answer is fine.
+            if not artifacts:
+                logger.warning("MD-only scheduled task %s produced no Markdown report", task.id)
+            elif not any(note.startswith("- ✅") for note in delivery_notes):
+                logger.warning("Markdown report for task %s could not be delivered", task.id)
+        elif delivery_notes:
             answer += "\n\n附件交付：\n" + "\n".join(delivery_notes)
         await asyncio.to_thread(
             feishu.send_text, task.chat_id, f"【定时任务：{task.name}】\n{answer[:27500]}"

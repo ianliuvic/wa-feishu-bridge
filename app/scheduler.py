@@ -15,18 +15,40 @@ from croniter import croniter
 
 MD_ONLY_DELIVERY_MARKER = "[[SCHEDULER_DELIVERY:MD_ONLY]]"
 
+# A run works in its own directory and can leave dozens of intermediate files
+# behind (JSON payloads, helper scripts, raw sources). The group chat only wants
+# the report.
+REPORT_NAME_HINT = "report"
+
+
+def _markdown_report_rank(artifact: dict) -> tuple[int, int, str]:
+    """Rank Markdown candidates so an obvious report beats a stray draft."""
+    name = str(artifact.get("name") or artifact.get("path") or "")
+    lowered = name.lower()
+    return (
+        0 if REPORT_NAME_HINT in lowered else 1,
+        -int(artifact.get("size") or 0),
+        lowered,
+    )
+
 
 def select_delivery_artifacts(prompt: str, artifacts: list[dict]) -> tuple[bool, list[dict]]:
-    """Apply the delivery policy embedded in a scheduled task prompt."""
+    """Apply the delivery policy embedded in a scheduled task prompt.
+
+    MD-only tasks deliver exactly one Markdown report; everything else stays in
+    the run directory.
+    """
     md_only = MD_ONLY_DELIVERY_MARKER in prompt
     if not md_only:
         return False, artifacts
-    selected = [
+    markdown = [
         artifact
         for artifact in artifacts
         if str(artifact.get("name") or artifact.get("path") or "").lower().endswith(".md")
     ]
-    return True, selected
+    if not markdown:
+        return True, []
+    return True, [min(markdown, key=_markdown_report_rank)]
 
 
 def utc_now() -> datetime:

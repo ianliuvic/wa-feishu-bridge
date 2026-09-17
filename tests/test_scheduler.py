@@ -89,6 +89,31 @@ class SchedulerStoreTests(unittest.TestCase):
         self.assertTrue(md_only)
         self.assertEqual(selected, [artifacts[0]])
 
+    def test_md_only_delivery_sends_only_one_report(self):
+        artifacts = [
+            {"name": "draft.md", "path": "draft.md", "size": 100},
+            {"name": "industry-news-report.md", "path": "industry-news-report.md", "size": 900},
+            {"name": "notes.md", "path": "notes.md", "size": 4000},
+        ]
+        md_only, selected = select_delivery_artifacts(MD_ONLY_DELIVERY_MARKER, artifacts)
+        self.assertTrue(md_only)
+        self.assertEqual([item["name"] for item in selected], ["industry-news-report.md"])
+
+    def test_md_only_falls_back_to_the_largest_markdown(self):
+        artifacts = [
+            {"name": "a.md", "path": "a.md", "size": 10},
+            {"name": "b.md", "path": "b.md", "size": 900},
+        ]
+        _, selected = select_delivery_artifacts(MD_ONLY_DELIVERY_MARKER, artifacts)
+        self.assertEqual([item["name"] for item in selected], ["b.md"])
+
+    def test_md_only_without_markdown_selects_nothing(self):
+        md_only, selected = select_delivery_artifacts(
+            MD_ONLY_DELIVERY_MARKER, [{"name": "data.json", "path": "data.json"}]
+        )
+        self.assertTrue(md_only)
+        self.assertEqual(selected, [])
+
     def test_default_delivery_keeps_all_artifacts(self):
         artifacts = [{"name": "data.json", "path": "data.json"}]
         md_only, selected = select_delivery_artifacts("Create the report.", artifacts)
