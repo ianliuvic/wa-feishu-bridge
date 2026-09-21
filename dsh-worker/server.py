@@ -40,6 +40,11 @@ DEFAULT_WORKSPACE = Path(os.getenv("DSH_WORKSPACE", "/workspace")).resolve()
 DSH_HOME = Path(os.getenv("DSH_HOME", "/root/.dsh")).resolve()
 DSH_PROFILE = os.getenv("DSH_PROFILE", "headless").strip() or "headless"
 DSH_BIN = os.getenv("DSH_BIN", "dsh").strip() or "dsh"
+# The directory the harness reads skills from. The image installs the Codex
+# skill set here and the entrypoint points skill-filesystem at it, so both
+# executors run the same tree and the paths inside the skills stay valid.
+SKILL_ROOT = Path(os.getenv("DSH_SKILL_ROOT", "/root/.codex/skills"))
+EXTERNAL_SKILL_DIRS = os.getenv("DSH_EXTERNAL_SKILL_DIRS", "/root/.codex/skills").split(":")
 PERMISSION_MODE = os.getenv("DSH_PERMISSION_MODE", "danger-full-access").strip()
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("DSH_MAX_CONCURRENT_RUNS", "2")))
 RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("DSH_RUN_TIMEOUT_SECONDS", "1800")))
@@ -84,17 +89,35 @@ def require_auth(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
+_DSH_VERSION: str | None = None
+
+
 def _dsh_version() -> str:
-    """Best-effort CLI version for the health payload; never fatal."""
+    """CLI version for the health payload, resolved once and then cached.
+
+    Coolify polls /health every few seconds, and `dsh --version` spawns a whole
+    Node process. Doing that per request made health latency 0.4-1.4s and would
+    let a busy box trip the 5s healthcheck timeout. The version cannot change
+    while a container is alive, so one lookup is enough. Never fatal.
+    """
+    global _DSH_VERSION
+    if _DSH_VERSION is not None:
+        return _DSH_VERSION
+
     import subprocess
 
     try:
         finished = subprocess.run(
             [DSH_BIN, "--version"], capture_output=True, text=True, timeout=30, check=False
         )
+        resolved = (finished.stdout or finished.stderr or "").strip()
     except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    return (finished.stdout or finished.stderr or "").strip() or "unavailable"
+        resolved = ""
+    # Only cache a real answer, so a transient failure can still recover.
+    if resolved:
+        _DSH_VERSION = resolved
+        return resolved
+    return "unavailable"
 
 
 def _resolve_workspace(value: str | None) -> Path:
@@ -338,6 +361,38 @@ async def _execute(req: RunRequest) -> RunResponse:
     return RunResponse(response=response, artifacts=artifacts)
 
 
+def _skill_state() -> dict[str, Any]:
+    """Report the skill tree and which generated config files are in place.
+
+    Presence and mode only - never a value or a byte of content.
+    """
+
+    def describe(path: Path) -> str:
+        try:
+            return oct(path.stat().st_mode & 0o777)[2:]
+        except OSError:
+            return "missing"
+
+    skills = 0
+    try:
+        skills = sum(1 for entry in SKILL_ROOT.iterdir() if (entry / "SKILL.md").is_file())
+    except OSError:
+        pass
+    return {
+        "skill_root": str(SKILL_ROOT),
+        "skills_with_manifest": skills,
+        "external_skill_dirs": EXTERNAL_SKILL_DIRS,
+        "generated_config": {
+            "wearhongxiu-wp/config.env": describe(SKILL_ROOT / "wearhongxiu-wp" / "config.env"),
+            "zoho-api/.env": describe(Path.home() / ".zoho-api" / ".env"),
+            "codex/config.toml": describe(Path.home() / ".codex" / "config.toml"),
+            "google-ads/service-account.json": describe(
+                Path.home() / ".codex" / "google-ads" / "service-account.json"
+            ),
+        },
+    }
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -353,6 +408,7 @@ async def health() -> dict[str, Any]:
         "max_concurrent_runs": MAX_CONCURRENT_RUNS,
         "active_runs": _active_runs,
         "run_timeout_seconds": RUN_TIMEOUT_SECONDS,
+        "skills": _skill_state(),
     }
 
 
