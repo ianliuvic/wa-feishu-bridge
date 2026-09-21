@@ -34,6 +34,29 @@ ZOHO_KEYS = [
     "ZOHO_CAMPAIGNS_FROM_NAME",
 ]
 
+# meta-business reads ~/.meta-business/credentials.json (or $META_BUSINESS_CONFIG_FILE).
+# Pairs are (environment variable, key in the credential file), taken from
+# meta_graph.require_object_id and media_stage's R2 block.
+META_CONFIG = Path(
+    os.getenv("META_BUSINESS_CONFIG_FILE", str(Path.home() / ".meta-business" / "credentials.json"))
+)
+META_KEYS = [
+    ("META_BUSINESS_ACCESS_TOKEN", "access_token"),
+    ("META_GRAPH_API_VERSION", "graph_api_version"),
+    ("META_BUSINESS_PAGE_ID", "page_id"),
+    ("META_BUSINESS_IG_USER_ID", "ig_user_id"),
+    ("META_BUSINESS_AD_ACCOUNT_ID", "ad_account_id"),
+    ("META_BUSINESS_BUSINESS_ID", "business_id"),
+    ("META_BUSINESS_CATALOG_ID", "catalog_id"),
+    ("META_THREADS_USER_ID", "threads_user_id"),
+    ("META_MEDIA_R2_ACCOUNT_ID", "media_r2_account_id"),
+    ("META_MEDIA_R2_ACCESS_KEY_ID", "media_r2_access_key_id"),
+    ("META_MEDIA_R2_SECRET_ACCESS_KEY", "media_r2_secret_access_key"),
+    ("META_MEDIA_R2_BUCKET", "media_r2_bucket"),
+    ("META_MEDIA_R2_PUBLIC_BASE_URL", "media_r2_public_base_url"),
+    ("META_MEDIA_R2_PREFIX", "media_r2_prefix"),
+]
+
 # Written in this order, matching the skill's own config.example.env so the file
 # stays familiar. Values come from the process environment.
 WEAR_KEYS = [
@@ -110,9 +133,26 @@ def write_wearhongxiu() -> str:
     return f"wrote {WEAR_CONFIG} with {configured}/{len(WEAR_KEYS)} values set"
 
 
+def write_meta() -> str:
+    present = {key: os.environ.get(env, "").strip() for env, key in META_KEYS}
+    if not present.get("access_token"):
+        return "skipped (META_BUSINESS_ACCESS_TOKEN is not set)"
+    payload = {key: value for key, value in present.items() if value}
+    META_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    temporary = META_CONFIG.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    temporary.replace(META_CONFIG)
+    os.chmod(META_CONFIG, 0o600)
+    return f"wrote {META_CONFIG} with {len(payload)} key(s)"
+
+
 def main() -> None:
     print("configure_skills:", write_zoho())
     print("configure_skills:", write_wearhongxiu())
+    print("configure_skills:", write_meta())
 
 
 if __name__ == "__main__":
