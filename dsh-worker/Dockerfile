@@ -21,6 +21,19 @@ RUN pip3 install --break-system-packages --no-cache-dir \
     fastapi==0.115.6 \
     uvicorn==0.32.1
 
+# Install the Codex-side skills at the *same* absolute path codex-worker uses.
+# Several skill bodies (hongxiu-weekly-product-email, marketing-scheduler,
+# reddit-ops, shopify-analytics) hardcode /root/.codex/skills/<name>/scripts/...,
+# so keeping the path identical is what lets DSH run them unmodified. The
+# entrypoint then points the harness's filesystem skill provider at this root.
+ARG SKILLS_REF=main
+RUN git clone --depth 1 --branch "${SKILLS_REF}" \
+        https://github.com/ianliuvic/wa-feishu-bridge.git /opt/bridge \
+    && mkdir -p /root/.codex/skills \
+    && cp -R /opt/bridge/codex-worker/bundled-skills/. /root/.codex/skills/ \
+    && rm -rf /opt/bridge \
+    && ls -1 /root/.codex/skills
+
 ENV DSH_HOME=/root/.dsh
 ENV DSH_PROFILE=headless
 # danger-full-access also pins the approval policy to "never" (see the dsh-base

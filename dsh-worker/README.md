@@ -47,6 +47,51 @@ creates or changes are reported back as artifacts.
 - **No LinkedIn/OAuth surface.** Those endpoints in `codex-worker` are Codex-worker
   specific and are not reproduced here.
 
+## Skills: reusing the Codex skill set
+
+DSH and Codex use the **same skill format** — a directory bundle `<name>/SKILL.md`
+whose YAML frontmatter carries `name` and `description`, with `scripts/`,
+`references/`, and `assets/` alongside it. DSH additionally accepts optional
+`whenToUse`, `metadata`, `disable-model-invocation`, and `user-invocable`.
+Everything codex-worker ships already satisfies this, so **no skill is rewritten
+or converted**.
+
+The image installs the Codex skill set at `/root/.codex/skills` — the same
+absolute path codex-worker uses — and the entrypoint points the harness's
+filesystem skill provider at it:
+
+```yaml
+# $DSH_HOME/cordis.patch.yml (written on first start, then preserved)
+- id: skill-filesystem
+  config:
+    customSkillDirs:
+      - /root/.codex/skills
+```
+
+Keeping the path identical is the load-bearing part. Four skill bodies
+(`hongxiu-weekly-product-email`, `marketing-scheduler`, `reddit-ops`,
+`shopify-analytics`) hardcode `/root/.codex/skills/<name>/scripts/...`, so both
+executors keep working against one skill tree and the scheduled prompts need no
+edits. Override the root with `DSH_SKILL_ROOT` if you ever need to.
+
+DSH's provider scans these roots in rank order:
+
+| Rank | Source | Path |
+|---|---|---|
+| 100 | project | `<projectRoot>/.dsh/skills` |
+| 200 | project | `<projectRoot>/.agents/skills` |
+| 300 | custom | `customSkillDirs` |
+| 400 | user | `$DSH_HOME/skills` |
+| 500 | shared | `~/.agents/skills` |
+
+Two consequences worth knowing:
+
+- Only `<name>/SKILL.md` directly under a root is discovered; nested `**/SKILL.md`
+  is deliberately ignored. The Codex layout already matches.
+- A duplicate `name` across roots is resolved by rank, so a leftover directory like
+  `1688-collector-ops.backup-<date>/` still declares `name: 1688-collector-ops` and
+  competes with the real one. Rank decides, not directory name.
+
 ## Configuration
 
 | Variable | Default | Meaning |
