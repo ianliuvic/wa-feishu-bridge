@@ -227,11 +227,49 @@ def write_credential_file() -> str:
     return f"wrote {CREDENTIAL_FILE} with {len(configured)}/{len(CREDENTIAL_KEYS)} values set"
 
 
+def write_linkedin_token() -> str:
+    """Decode LINKEDIN_TOKEN_B64 into the path linkedin.py reads.
+
+    The token comes from an interactive OAuth flow whose redirect URI is
+    registered to the codex-worker domain, so it cannot be re-created from the
+    dsh-worker; it is exported once and carried here base64-encoded. Note it is
+    an access token with no refresh token, so when it expires it must be
+    re-authorized on codex-worker and re-exported - do not try to refresh it
+    here. Because of that, exactly one worker should own re-authorization.
+    """
+    import base64
+
+    encoded = os.environ.get("LINKEDIN_TOKEN_B64", "").strip()
+    if not encoded:
+        return "skipped (LINKEDIN_TOKEN_B64 is not set)"
+    target = Path(
+        os.environ.get("LINKEDIN_TOKEN_PATH", str(Path.home() / ".codex" / "linkedin" / "oauth.json"))
+    )
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        parsed = json.loads(decoded)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        return f"FAILED to decode LINKEDIN_TOKEN_B64: {type(exc).__name__}"
+    if not parsed.get("access_token"):
+        return "FAILED: decoded payload has no access_token"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(decoded if decoded.endswith("\n") else decoded + "\n")
+    temporary.replace(target)
+    os.chmod(target, 0o600)
+    expires = parsed.get("expires_at")
+    return f"wrote {target} (access_token present, expires_at={expires}, refresh_token={bool(parsed.get('refresh_token'))})"
+
+
 def main() -> None:
     print("configure_skills:", write_zoho())
     print("configure_skills:", write_wearhongxiu())
     print("configure_skills:", write_meta())
     print("configure_skills:", write_credential_file())
+    print("configure_skills:", write_linkedin_token())
 
 
 if __name__ == "__main__":

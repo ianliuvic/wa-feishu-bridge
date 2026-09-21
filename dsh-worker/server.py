@@ -397,6 +397,9 @@ def _skill_state() -> dict[str, Any]:
             "dsh-skill-credentials.env": describe(
                 Path(os.getenv("DSH_SKILL_CREDENTIALS", "/root/.dsh-skill-credentials.env"))
             ),
+            "linkedin/oauth.json": describe(
+                Path(os.getenv("LINKEDIN_TOKEN_PATH", "/root/.codex/linkedin/oauth.json"))
+            ),
         },
     }
 
