@@ -36,15 +36,14 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # reddit-ops, shopify-analytics) hardcode /root/.codex/skills/<name>/scripts/...,
 # so keeping the path identical is what lets DSH run them unmodified. The
 # entrypoint then points the harness's filesystem skill provider at this root.
-ARG SKILLS_REF=main
-RUN mkdir -p /opt/dsh-worker \
-    && git clone --depth 1 --branch "${SKILLS_REF}" \
-        https://github.com/ianliuvic/wa-feishu-bridge.git /opt/bridge \
-    && mkdir -p /root/.codex/skills \
-    && cp -R /opt/bridge/codex-worker/bundled-skills/. /root/.codex/skills/ \
-    && cp /opt/bridge/codex-worker/configure_google_ads.py /opt/dsh-worker/configure_google_ads.py \
-    && rm -rf /opt/bridge \
-    && ls -1 /root/.codex/skills
+#
+# These come from the build context, NOT a `git clone` of a moving ref: cloning
+# inside a cached RUN layer silently ships stale skill code whenever only the
+# repo moves and the Dockerfile does not. That is exactly how a credential fix
+# failed to reach a running container once. The context is the repository root,
+# so base_directory is "/" and dockerfile_location is /dsh-worker/Dockerfile.
+COPY codex-worker/bundled-skills/ /root/.codex/skills/
+COPY codex-worker/configure_google_ads.py /opt/dsh-worker/configure_google_ads.py
 
 ENV DSH_HOME=/root/.dsh
 ENV DSH_PROFILE=headless
@@ -63,10 +62,12 @@ RUN dsh --profile headless --dump-config > /dev/null \
     && dsh --profile headless --help > /dev/null \
     && test -f /root/.dsh/profiles/headless/package.json
 
-COPY server.py /opt/dsh-worker/server.py
-COPY configure_skills.py /opt/dsh-worker/configure_skills.py
-COPY entrypoint.sh /opt/dsh-worker/entrypoint.sh
-RUN chmod +x /opt/dsh-worker/entrypoint.sh
+RUN mkdir -p /opt/dsh-worker
+COPY dsh-worker/server.py /opt/dsh-worker/server.py
+COPY dsh-worker/configure_skills.py /opt/dsh-worker/configure_skills.py
+COPY dsh-worker/entrypoint.sh /opt/dsh-worker/entrypoint.sh
+RUN chmod +x /opt/dsh-worker/entrypoint.sh \
+    && ls -1 /root/.codex/skills
 
 EXPOSE 80
 CMD ["/opt/dsh-worker/entrypoint.sh"]
