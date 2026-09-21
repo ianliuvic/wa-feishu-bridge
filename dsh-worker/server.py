@@ -385,6 +385,9 @@ def _skill_state() -> dict[str, Any]:
         "generated_config": {
             "wearhongxiu-wp/config.env": describe(SKILL_ROOT / "wearhongxiu-wp" / "config.env"),
             "zoho-api/.env": describe(Path.home() / ".zoho-api" / ".env"),
+            "meta-business/credentials.json": describe(
+                Path.home() / ".meta-business" / "credentials.json"
+            ),
             "codex/config.toml": describe(Path.home() / ".codex" / "config.toml"),
             "google-ads/service-account.json": describe(
                 Path.home() / ".codex" / "google-ads" / "service-account.json"
