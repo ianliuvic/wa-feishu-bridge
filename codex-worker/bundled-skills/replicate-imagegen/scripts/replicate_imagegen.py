@@ -16,6 +16,15 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+# DSH strips credential-shaped variables from the shell environment it gives
+# child processes, so pull this skill's credentials from the harness-managed
+# file when they are not already present. No-op on a Codex worker.
+try:
+    from skill_credentials import load as _load_skill_credentials
+    _load_skill_credentials("REPLICATE_API_TOKEN")
+except ImportError:
+    pass
+
 
 DEFAULT_MODEL = "black-forest-labs/flux-schnell"
 DEFAULT_OUT = "output/imagegen/replicate-output.png"

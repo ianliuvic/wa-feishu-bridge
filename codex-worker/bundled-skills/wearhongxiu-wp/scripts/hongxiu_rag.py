@@ -30,6 +30,15 @@ import sys
 import urllib.error
 import urllib.request
 
+# DSH strips credential-shaped variables from the shell environment it gives
+# child processes, so pull this skill's credentials from the harness-managed
+# file when they are not already present. No-op on a Codex worker.
+try:
+    from skill_credentials import load as _load_skill_credentials
+    _load_skill_credentials("HONGXIU_RAG_TOKEN", "HONGXIU_RAG_URL")
+except ImportError:
+    pass
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")

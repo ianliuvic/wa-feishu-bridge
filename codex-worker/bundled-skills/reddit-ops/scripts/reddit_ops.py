@@ -12,6 +12,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+# DSH strips credential-shaped variables from the shell environment it gives
+# child processes, so pull this skill's credentials from the harness-managed
+# file when they are not already present. No-op on a Codex worker.
+try:
+    from skill_credentials import load as _load_skill_credentials
+    _load_skill_credentials("REDDIT_OPS_URL", "REDDIT_OPS_API_KEY")
+except ImportError:
+    pass
+
 
 def config() -> tuple[str, str]:
     base = os.getenv("REDDIT_OPS_URL", "https://reddit-ops.yiswim.cloud").strip().rstrip("/")

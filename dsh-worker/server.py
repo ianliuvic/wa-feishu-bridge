@@ -392,6 +392,11 @@ def _skill_state() -> dict[str, Any]:
             "google-ads/service-account.json": describe(
                 Path.home() / ".codex" / "google-ads" / "service-account.json"
             ),
+            # The fallback for skills whose credentials the harness scrubs out of
+            # the shell environment; read by the skill_credentials helper.
+            "dsh-skill-credentials.env": describe(
+                Path(os.getenv("DSH_SKILL_CREDENTIALS", "/root/.dsh-skill-credentials.env"))
+            ),
         },
     }
 

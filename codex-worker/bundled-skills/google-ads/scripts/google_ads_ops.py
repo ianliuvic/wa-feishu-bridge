@@ -12,6 +12,15 @@ import re
 import sys
 from typing import Any
 
+# DSH strips credential-shaped variables from the shell environment it gives
+# child processes, so pull this skill's credentials from the harness-managed
+# file when they are not already present. No-op on a Codex worker.
+try:
+    from skill_credentials import load as _load_skill_credentials
+    _load_skill_credentials("GOOGLE_ADS_DEVELOPER_TOKEN")
+except ImportError:
+    pass
+
 
 CONFIG_PATH = Path(os.environ.get("CODEX_CONFIG", Path.home() / ".codex" / "config.toml"))
 AUDIT_PATH = Path.home() / ".codex" / "google-ads" / "mutation-audit.jsonl"

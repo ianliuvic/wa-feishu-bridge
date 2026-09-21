@@ -17,6 +17,15 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+# DSH strips credential-shaped variables from the shell environment it gives
+# child processes, so pull this skill's credentials from the harness-managed
+# file when they are not already present. No-op on a Codex worker.
+try:
+    from skill_credentials import load as _load_skill_credentials
+    _load_skill_credentials("COLLECTOR_API_URL", "COLLECTOR_API_KEY")
+except ImportError:
+    pass
+
 
 BASE_URL = os.getenv("COLLECTOR_API_URL", "https://collector.yiswim.cloud").rstrip("/")
 API_KEY = os.getenv("COLLECTOR_API_KEY", "").strip()
