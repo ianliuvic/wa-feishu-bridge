@@ -1,0 +1,4 @@
+interface:
+  display_name: "Replicate Imagegen"
+  short_description: "Generate images through Replicate models."
+  default_prompt: "Generate an image with Replicate from this prompt:"

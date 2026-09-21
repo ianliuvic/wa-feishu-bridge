@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crun Video"
+  short_description: "Generate and edit videos with Crun AI models"
+  default_prompt: "Use $crun-video to generate or edit a video from my description."

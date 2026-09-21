@@ -1,0 +1,7 @@
+interface:
+  display_name: "Wearhongxiu WordPress"
+  short_description: "Manage Wearhongxiu WordPress and humanized post publishing"
+  default_prompt: "Use $wearhongxiu-wp to inspect or safely manage Wearhongxiu WordPress, create and humanize posts before publishing, update website RAG, or perform SEO and Google Search Console work."
+
+policy:
+  allow_implicit_invocation: true

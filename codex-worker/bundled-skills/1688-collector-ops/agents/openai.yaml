@@ -1,0 +1,4 @@
+interface:
+  display_name: "1688 Collector Operations"
+  short_description: "Operate the remote 1688 collector and noVNC login app safely"
+  default_prompt: "Use $1688-collector-ops to inspect or operate the Coolify 1688 collector and noVNC login service."

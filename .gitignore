@@ -4,3 +4,14 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# Skill runtime state and credentials. Skills are version-controlled; anything
+# they read at runtime is not. Mirrors the per-skill .gitignore files so a stray
+# copy cannot be committed even if one is dropped in later.
+codex-worker/bundled-skills/**/config.env
+codex-worker/bundled-skills/**/cache/
+codex-worker/bundled-skills/**/seo/
+codex-worker/bundled-skills/**/backups/
+codex-worker/bundled-skills/**/*.bak
+codex-worker/bundled-skills/**/*.bak-*
+codex-worker/bundled-skills/.system/

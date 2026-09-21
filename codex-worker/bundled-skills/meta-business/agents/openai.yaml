@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meta Business"
+  short_description: "Manage Meta Pages, Instagram, ads, leads, and assets"
+  default_prompt: "Use $meta-business to inspect or manage my authorized Meta business assets safely."

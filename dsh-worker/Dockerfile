@@ -4,6 +4,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        ffmpeg \
         git \
         jq \
         python3 \
@@ -17,9 +18,18 @@ ARG DSH_VERSION=0.1.5-rc.2
 RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" \
     && dsh --version
 
+# The skill scripts import these directly. google-ads-mcp pulls in the
+# google-ads / google-auth / protobuf stack that google-ads and the wearhongxiu
+# SEO scripts need; pillow and PyYAML are used by the image and news workflows.
+# Mirrors what codex-worker installs, so a skill behaves the same on both.
 RUN pip3 install --break-system-packages --no-cache-dir \
     fastapi==0.115.6 \
-    uvicorn==0.32.1
+    uvicorn==0.32.1 \
+    google-ads-mcp==0.0.1 \
+    pillow \
+    PyYAML \
+    openai \
+    requests
 
 # Install the Codex-side skills at the *same* absolute path codex-worker uses.
 # Several skill bodies (hongxiu-weekly-product-email, marketing-scheduler,
@@ -52,6 +62,7 @@ RUN dsh --profile headless --dump-config > /dev/null \
     && test -f /root/.dsh/profiles/headless/package.json
 
 COPY server.py /opt/dsh-worker/server.py
+COPY configure_skills.py /opt/dsh-worker/configure_skills.py
 COPY entrypoint.sh /opt/dsh-worker/entrypoint.sh
 RUN chmod +x /opt/dsh-worker/entrypoint.sh
 

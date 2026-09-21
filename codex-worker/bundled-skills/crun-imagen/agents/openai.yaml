@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crun Imagen"
+  short_description: "Generate images with Crun GPT, Grok, or Nano Banana 2"
+  default_prompt: "Use $crun-imagen to create an image from my description with the appropriate Crun model."
