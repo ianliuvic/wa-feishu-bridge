@@ -55,6 +55,7 @@ from .config import (
     FEISHU_EVENT_FORWARD_URL,
     FEISHU_EVENT_PATH,
     FEISHU_REPLY_CONFIRM,
+    MARKETING_CHAT_ENABLED,
     MARKETING_CHAT_ID,
     SCHEDULER_API_TOKEN,
     SCHEDULER_DB_PATH,
@@ -70,6 +71,20 @@ from .scheduler import SchedulerStore, select_delivery_artifacts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bridge")
+
+# asyncio holds only a weak reference to a task, so a fire-and-forget task can be
+# garbage collected before it ever runs - the documented reason the stdlib tells
+# you to keep a reference. Every detached task is registered here and dropped
+# when it settles, so a scheduled run or a chat dispatch cannot silently vanish.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Schedule a detached coroutine and keep it alive until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 app = FastAPI(title="WA-Feishu Bridge", version="2.0.0")
 feishu = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -616,7 +631,7 @@ async def scheduler_loop() -> None:
             await asyncio.to_thread(attachment_store.purge_expired)
             due = await asyncio.to_thread(scheduler_store.claim_due)
             for task, run_id in due:
-                asyncio.create_task(run_scheduled_task(task, run_id))
+                _spawn(run_scheduled_task(task, run_id))
         except Exception:  # noqa: BLE001
             logger.exception("scheduler polling failed")
         await asyncio.sleep(SCHEDULER_POLL_SECONDS)
@@ -769,6 +784,7 @@ async def health():
         "codex": {
             "configured": bool(CODEX_WORKER_URL and CODEX_WORKER_TOKEN),
             "marketing_chat_configured": bool(MARKETING_CHAT_ID),
+            "marketing_chat_enabled": MARKETING_CHAT_ENABLED,
         },
         "scheduler": scheduler_store.health(),
         "attachments": attachment_store.health(),
@@ -951,7 +967,7 @@ async def feishu_event(request: Request):
         # Message events do not need a synchronous response. Acknowledge Feishu
         # immediately and keep the existing mail consumer updated in background.
         if FEISHU_EVENT_FORWARD_URL:
-            asyncio.create_task(forward_feishu_payload(payload))
+            _spawn(forward_feishu_payload(payload))
         return {"code": 0}
 
     # Card callbacks may need their downstream response body, so preserve the
@@ -1022,6 +1038,18 @@ async def _handle_receive(payload: dict) -> None:
         return
 
     if MARKETING_CHAT_ID and chat_id == MARKETING_CHAT_ID:
+        if not MARKETING_CHAT_ENABLED:
+            # Interactive chat is switched off: no codex call, no attachment
+            # staging, and no reply. Scheduled task output still reaches this
+            # group, because that path uses the task's own chat_id and never
+            # passes through here. Logged once per message so an operator can
+            # tell "disabled on purpose" from "silently broken".
+            logger.info(
+                "marketing chat is disabled; ignoring message_type=%s chat_id=%s",
+                msg.get("message_type"),
+                chat_id,
+            )
+            return
         message_type = msg.get("message_type")
         message_id = msg.get("message_id", "")
         sender_id = _sender_id(sender)
@@ -1045,7 +1073,7 @@ async def _handle_receive(payload: dict) -> None:
                 attachments = await asyncio.to_thread(
                     attachment_store.pop_for_user, chat_id, sender_id
                 )
-            asyncio.create_task(
+            _spawn(
                 process_marketing_message(chat_id, message_id, text, attachments)
             )
             return
@@ -1059,7 +1087,7 @@ async def _handle_receive(payload: dict) -> None:
         elif message_type in {"file", "media", "audio"}:
             resource_key = content.get("file_key") or ""
         if resource_key and message_id:
-            asyncio.create_task(
+            _spawn(
                 stage_marketing_attachment(
                     chat_id=chat_id,
                     sender_id=sender_id,

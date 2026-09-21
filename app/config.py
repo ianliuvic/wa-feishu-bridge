@@ -51,6 +51,17 @@ FEISHU_EVENT_FORWARD_URL = os.getenv("FEISHU_EVENT_FORWARD_URL", "")
 # Feishu marketing group -> Codex bridge. The WhatsApp target FEISHU_CHAT_ID stays
 # separate so the existing customer reply flow is not affected.
 MARKETING_CHAT_ID = os.getenv("MARKETING_CHAT_ID", "").strip()
+# Interactive marketing-group chat: a message in MARKETING_CHAT_ID is handed to
+# the codex executor, and images/files are staged for it. Turning this off stops
+# both, and the group keeps receiving scheduled task output as before.
+#
+# Opt-out, and a blank value means ON: an environment entry that exists but is
+# empty must not silently switch a live feature off.
+_MARKETING_CHAT_VALUE = os.getenv("MARKETING_CHAT_ENABLED", "").strip().lower()
+MARKETING_CHAT_ENABLED = (
+    True if not _MARKETING_CHAT_VALUE
+    else _MARKETING_CHAT_VALUE in ("1", "true", "yes", "on")
+)
 CODEX_WORKER_URL = os.getenv("CODEX_WORKER_URL", "").rstrip("/")
 CODEX_WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "")
 CODEX_RUN_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800"))
