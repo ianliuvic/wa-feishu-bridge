@@ -1,16 +1,23 @@
 """Materialize skill runtime config from environment variables.
 
-Some skills read a `config.env` that sits beside their SKILL.md rather than
-reading the process environment directly - notably `wearhongxiu-wp`, whose
-scripts do `SKILL_DIR / "config.env"`. That file holds live credentials, so it
-is deliberately absent from version control and is rebuilt here at container
-start from the Coolify environment. Nothing secret is baked into the image.
+Some skills read a config file beside, or instead of, the process environment:
+`wearhongxiu-wp` uses `<skill>/config.env`, `zoho-api` uses `~/.zoho-api/.env`,
+and `meta-business` uses `~/.meta-business/credentials.json`. Those files hold
+live credentials, so they are deliberately absent from version control and are
+rebuilt here at container start from the Coolify environment. Nothing secret is
+baked into the image.
+
+This matters more under DSH than it did under Codex: the harness scrubs any
+ambient variable whose name matches KEY/PASSWORD/SECRET/TOKEN out of the
+environment it gives shell commands, so a skill that only reads `os.environ`
+cannot see its credential at all. A file on disk is the supported path.
 
 Run from the entrypoint before the server starts.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
