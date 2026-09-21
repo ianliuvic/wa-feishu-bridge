@@ -543,8 +543,25 @@ async def deliver_codex_artifacts(
 
 
 def should_suppress_scheduler_notification(answer: str, artifacts: list[dict]) -> bool:
-    """Allow monitor jobs to report healthy runs without creating Feishu noise."""
-    return answer.strip() == SCHEDULER_SILENT_MARKER and not artifacts
+    """Silence a healthy monitor run.
+
+    The marker is an explicit instruction from the task that it has nothing to
+    report, and each task that uses it says so in its own prompt: "调度器识别该
+    标记后会记录成功但不向飞书发送消息". An exact match therefore suppresses the
+    message and the run's files are not delivered either.
+
+    Artifacts deliberately no longer veto this. A monitor run leaves working
+    files behind - logs, snapshots, a helper script - and those are not
+    deliverables; treating them as such put nine dead attachment lines and a raw
+    `SCHEDULER_SILENT` into the group on a run that was healthy. A task that
+    wants something delivered must not return the marker, which is exactly what
+    its prompt tells it, and the match stays exact so the marker cannot be
+    emitted incidentally as part of a longer answer.
+
+    @param answer - the run's final message.
+    @param artifacts - files the run produced; logged by the caller when dropped.
+    """
+    return answer.strip() == SCHEDULER_SILENT_MARKER
 
 
 async def run_scheduled_task(task, run_id: str) -> None:
@@ -587,7 +604,13 @@ async def run_scheduled_task(task, run_id: str) -> None:
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
         raw_artifacts = result.get("artifacts") or []
         if should_suppress_scheduler_notification(answer, raw_artifacts):
-            logger.info("scheduled task %s completed silently", task.id)
+            # Recorded as a success, nothing sent to Feishu. Any files the run
+            # left behind are working files and are not delivered.
+            logger.info(
+                "scheduled task %s completed silently; %d artifact(s) not delivered",
+                task.id,
+                len(raw_artifacts),
+            )
             scheduler_store.finish_run(task.id, run_id, response=answer)
             return
         md_only, artifacts = select_delivery_artifacts(

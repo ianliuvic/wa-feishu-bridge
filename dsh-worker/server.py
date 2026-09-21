@@ -495,8 +495,20 @@ async def get_run(run_id: str):
 
 @app.get("/v1/artifacts/{artifact_path:path}", dependencies=[Depends(require_auth)])
 async def download_artifact(artifact_path: str) -> FileResponse:
+    """Serve a file a run produced.
+
+    Artifact paths are workspace-relative, so each one already starts with the
+    artifacts directory name - and a caller passes that path through verbatim.
+    Resolving it under the artifacts root again doubled the prefix and 404'd
+    every fetch. Both forms are accepted, and serving stays confined to the
+    artifacts root.
+    """
     artifact_root = (DEFAULT_WORKSPACE / ARTIFACT_DIR_NAME).resolve()
-    candidate = (artifact_root / artifact_path).resolve()
+    relative = artifact_path.lstrip("/")
+    prefix = f"{ARTIFACT_DIR_NAME}/"
+    if relative.startswith(prefix):
+        relative = relative[len(prefix):]
+    candidate = (artifact_root / relative).resolve()
     if artifact_root not in candidate.parents or not candidate.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(candidate, filename=candidate.name)
