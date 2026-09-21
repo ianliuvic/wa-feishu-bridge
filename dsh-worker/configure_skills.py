@@ -17,6 +17,7 @@ Run from the entrypoint before the server starts.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -228,40 +229,73 @@ def write_credential_file() -> str:
 
 
 def write_linkedin_token() -> str:
-    """Decode LINKEDIN_TOKEN_B64 into the path linkedin.py reads.
+    """The interactively-issued LinkedIn token, carried base64-encoded.
 
-    The token comes from an interactive OAuth flow whose redirect URI is
-    registered to the codex-worker domain, so it cannot be re-created from the
-    dsh-worker; it is exported once and carried here base64-encoded. Note it is
-    an access token with no refresh token, so when it expires it must be
-    re-authorized on codex-worker and re-exported - do not try to refresh it
-    here. Because of that, exactly one worker should own re-authorization.
+    It has no refresh token, so when it expires it must be re-authorized on
+    codex-worker and re-exported - exactly one worker should own that.
     """
-    import base64
-
-    encoded = os.environ.get("LINKEDIN_TOKEN_B64", "").strip()
-    if not encoded:
-        return "skipped (LINKEDIN_TOKEN_B64 is not set)"
     target = Path(
-        os.environ.get("LINKEDIN_TOKEN_PATH", str(Path.home() / ".codex" / "linkedin" / "oauth.json"))
+        os.environ.get(
+            "LINKEDIN_TOKEN_PATH",
+            str(Path.home() / ".codex" / "linkedin" / "oauth.json"),
+        )
     )
+    return write_base64_file("LINKEDIN_TOKEN_B64", target, label="linkedin")
+
+
+def write_base64_file(
+    var: str, target: Path, *, label: str, require_json: bool = True,
+) -> str:
+    """Decode a base64 environment variable into a 0600 file.
+
+    Used for credentials that exist only as a file on codex-worker and cannot be
+    regenerated here (an interactively-issued OAuth token, a Google service
+    account). The payload is carried in the Coolify environment and written on
+    every start, so nothing secret is baked into the image.
+    """
+    encoded = os.environ.get(var, "").strip()
+    if not encoded:
+        return f"skipped ({var} is not set)"
     try:
         decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-        parsed = json.loads(decoded)
     except Exception as exc:  # noqa: BLE001 - reported, never fatal
-        return f"FAILED to decode LINKEDIN_TOKEN_B64: {type(exc).__name__}"
-    if not parsed.get("access_token"):
-        return "FAILED: decoded payload has no access_token"
+        return f"FAILED to decode {var}: {type(exc).__name__}"
+    if require_json:
+        try:
+            parsed = json.loads(decoded)
+        except json.JSONDecodeError:
+            return f"FAILED: {var} does not decode to JSON"
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".tmp")
+    temporary = target.with_suffix(target.suffix + ".tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(decoded if decoded.endswith("\n") else decoded + "\n")
     temporary.replace(target)
     os.chmod(target, 0o600)
-    expires = parsed.get("expires_at")
-    return f"wrote {target} (access_token present, expires_at={expires}, refresh_token={bool(parsed.get('refresh_token'))})"
+
+    if label == "linkedin":
+        expires = parsed.get("expires_at")
+        return (f"wrote {target} (access_token={bool(parsed.get('access_token'))}, "
+                f"expires_at={expires}, refresh_token={bool(parsed.get('refresh_token'))})")
+    kind = parsed.get("type") or parsed.get("client_email") or "json"
+    return f"wrote {target} ({len(decoded)} bytes, kind={kind})"
+
+
+def write_gsc_credentials() -> str:
+    """The Google service account the GA4 and GSC reports read.
+
+    wearhongxiu-wp points WEARHONGXIU_GSC_CREDENTIALS at a path, and GA4 falls
+    back to the same file. Migrating the path without the file is what made both
+    weekly reports fail with "credential missing" while codex-worker worked.
+    """
+    target = Path(
+        os.environ.get(
+            "WEARHONGXIU_GSC_CREDENTIALS",
+            str(Path.home() / ".codex" / "credentials" / "wearhongxiu-gsc.json"),
+        )
+    )
+    return write_base64_file("WEARHONGXIU_GSC_CREDENTIALS_B64", target, label="gsc")
 
 
 def main() -> None:
@@ -270,6 +304,7 @@ def main() -> None:
     print("configure_skills:", write_meta())
     print("configure_skills:", write_credential_file())
     print("configure_skills:", write_linkedin_token())
+    print("configure_skills:", write_gsc_credentials())
 
 
 if __name__ == "__main__":
