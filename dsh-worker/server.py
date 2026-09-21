@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 WORKER_TOKEN = os.getenv("DSH_WORKER_TOKEN", "").strip()
@@ -53,10 +53,26 @@ RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("DSH_RUN_TIMEOUT_SECONDS", "1800")))
 MAX_PROMPT_BYTES = max(1024, int(os.getenv("DSH_MAX_PROMPT_BYTES", "120000")))
 ARTIFACT_DIR_NAME = os.getenv("DSH_ARTIFACT_DIR_NAME", "dsh-artifacts").strip() or "dsh-artifacts"
 
-app = FastAPI(title="DSH Worker API", version="1.0.0")
+app = FastAPI(title="DSH Worker API", version="1.1.0")
 _run_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
 _active_runs = 0
 logger = logging.getLogger("dsh-worker")
+
+# Completed and in-flight async runs, keyed by run id. Bounded so a long-lived
+# worker cannot grow without limit; the oldest finished entry is dropped first.
+MAX_TRACKED_RUNS = 200
+_runs: dict[str, dict[str, Any]] = {}
+_runs_lock = asyncio.Lock()
+
+
+async def _remember(run_id: str, record: dict[str, Any]) -> None:
+    async with _runs_lock:
+        _runs[run_id] = record
+        if len(_runs) > MAX_TRACKED_RUNS:
+            for key in [k for k, v in _runs.items() if v.get("status") != "running"][
+                : len(_runs) - MAX_TRACKED_RUNS
+            ]:
+                _runs.pop(key, None)
 
 
 class RunRequest(BaseModel):
@@ -64,6 +80,11 @@ class RunRequest(BaseModel):
     workspace: str | None = None
     artifact_dir: str | None = Field(default=None, max_length=500)
     run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,160}$")
+    # Return a run id immediately instead of holding the HTTP request open for
+    # the whole run. A long task can outlive any proxy's idle timeout - observed
+    # at ~12 minutes, where the run finished fine but the caller never got the
+    # response - so callers that may wait should poll GET /v1/runs/{run_id}.
+    async_mode: bool = False
 
 
 class ArtifactInfo(BaseModel):
@@ -202,12 +223,10 @@ def _is_retryable_failure(message: str) -> bool:
     )
 
 
-async def _execute(req: RunRequest) -> RunResponse:
-    global _active_runs
-
-    started_at = time.monotonic()
+async def _execute(req: RunRequest, run_id: str | None = None) -> RunResponse:
     workspace = _resolve_workspace(req.workspace)
-    run_id = req.run_id or uuid.uuid4().hex
+    run_id = run_id or req.run_id or uuid.uuid4().hex
+    started_at = time.monotonic()
     artifact_root = _resolve_artifact_root(workspace, req.artifact_dir)
 
     encoded_prompt = req.prompt.encode("utf-8")
@@ -423,16 +442,55 @@ async def health() -> dict[str, Any]:
     }
 
 
-@app.post("/v1/runs", response_model=RunResponse, dependencies=[Depends(require_auth)])
-async def run_dsh(req: RunRequest) -> RunResponse:
+async def _run_slot(req: RunRequest, run_id: str) -> RunResponse:
+    """Take a concurrency slot and execute, tracking active count."""
     global _active_runs
 
     async with _run_slots:
         _active_runs += 1
         try:
-            return await _execute(req)
+            return await _execute(req, run_id)
         finally:
             _active_runs -= 1
+
+
+async def _background_run(req: RunRequest, run_id: str) -> None:
+    """Execute a run whose caller is not waiting on the HTTP response."""
+    try:
+        result = await _run_slot(req, run_id)
+        await _remember(run_id, {"status": "done", "result": result.model_dump()})
+    except HTTPException as exc:
+        await _remember(run_id, {
+            "status": "failed",
+            "error": exc.detail if isinstance(exc.detail, (str, dict)) else str(exc.detail),
+            "returncode": 502 if exc.status_code >= 500 else exc.status_code,
+        })
+    except Exception as exc:  # noqa: BLE001 - must never escape a detached task
+        logger.exception("async run %s failed", run_id)
+        await _remember(run_id, {"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+
+
+@app.post("/v1/runs", response_model=None, dependencies=[Depends(require_auth)])
+async def run_dsh(req: RunRequest):
+    """Run one task. With async_mode the call returns a run id immediately."""
+    run_id = req.run_id or uuid.uuid4().hex
+
+    if req.async_mode:
+        await _remember(run_id, {"status": "running"})
+        asyncio.create_task(_background_run(req, run_id))
+        return JSONResponse(status_code=202, content={"run_id": run_id, "status": "running"})
+
+    return await _run_slot(req, run_id)
+
+
+@app.get("/v1/runs/{run_id}", dependencies=[Depends(require_auth)])
+async def get_run(run_id: str):
+    """Poll a run started with async_mode."""
+    async with _runs_lock:
+        record = _runs.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    return record
 
 
 @app.get("/v1/artifacts/{artifact_path:path}", dependencies=[Depends(require_auth)])
