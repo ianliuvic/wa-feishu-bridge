@@ -37,10 +37,12 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # so keeping the path identical is what lets DSH run them unmodified. The
 # entrypoint then points the harness's filesystem skill provider at this root.
 ARG SKILLS_REF=main
-RUN git clone --depth 1 --branch "${SKILLS_REF}" \
+RUN mkdir -p /opt/dsh-worker \
+    && git clone --depth 1 --branch "${SKILLS_REF}" \
         https://github.com/ianliuvic/wa-feishu-bridge.git /opt/bridge \
     && mkdir -p /root/.codex/skills \
     && cp -R /opt/bridge/codex-worker/bundled-skills/. /root/.codex/skills/ \
+    && cp /opt/bridge/codex-worker/configure_google_ads.py /opt/dsh-worker/configure_google_ads.py \
     && rm -rf /opt/bridge \
     && ls -1 /root/.codex/skills
 

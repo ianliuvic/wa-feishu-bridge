@@ -34,10 +34,16 @@ if [ ! -d "$SKILL_ROOT" ]; then
     echo "WARNING: skill root $SKILL_ROOT does not exist; dsh will see no Codex skills." >&2
 fi
 
-# Skill runtime config (e.g. wearhongxiu-wp/config.env) is rebuilt from the
-# environment on every start, so no credential is baked into the image and a
-# lost container filesystem cannot lose the configuration.
+# Skill runtime config (e.g. wearhongxiu-wp/config.env, ~/.zoho-api/.env) is
+# rebuilt from the environment on every start, so no credential is baked into
+# the image and a lost container filesystem cannot lose the configuration.
 python3 /opt/dsh-worker/configure_skills.py
+
+# google-ads reads its token and service-account path out of ~/.codex/config.toml,
+# so the same bootstrap codex-worker uses is reused verbatim here. It is a no-op
+# unless the GOOGLE_ADS_* variables are present.
+python3 /opt/dsh-worker/configure_google_ads.py || \
+    echo "WARNING: Google Ads MCP configuration failed" >&2
 
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
     echo "WARNING: DEEPSEEK_API_KEY is not set; dsh runs will fail to reach the model." >&2
