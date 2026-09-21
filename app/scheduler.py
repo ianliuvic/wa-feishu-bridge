@@ -80,6 +80,9 @@ class ScheduledTask:
     cron: str
     timezone: str
     chat_id: str
+    # Executor that runs this task. Defaults to codex so every pre-existing row
+    # keeps its current behaviour.
+    worker: str
     enabled: bool
     next_run_at: str | None
     last_run_at: str | None
@@ -117,6 +120,7 @@ class SchedulerStore:
                     cron TEXT NOT NULL,
                     timezone TEXT NOT NULL,
                     chat_id TEXT NOT NULL,
+                    worker TEXT NOT NULL DEFAULT 'codex',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     next_run_at TEXT,
                     last_run_at TEXT,
@@ -148,6 +152,23 @@ class SchedulerStore:
                 );
                 """
             )
+            # Additive migration: CREATE TABLE IF NOT EXISTS does nothing to an
+            # existing database, so the executor column is added explicitly. The
+            # default keeps every existing task on codex-worker.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_tasks)")}
+            if "worker" not in columns:
+                conn.execute(
+                    "ALTER TABLE scheduled_tasks ADD COLUMN worker TEXT NOT NULL DEFAULT 'codex'"
+                )
+
+    @staticmethod
+    def _worker(value: str | None) -> str:
+        from .config import WORKER_NAMES
+
+        key = (value or "codex").strip().lower() or "codex"
+        if key not in WORKER_NAMES:
+            raise ValueError(f"unknown executor {key!r}; expected one of {WORKER_NAMES}")
+        return key
 
     @staticmethod
     def _task(row: sqlite3.Row) -> ScheduledTask:
@@ -156,7 +177,8 @@ class SchedulerStore:
         return ScheduledTask(**values)
 
     def create_task(
-        self, *, name: str, prompt: str, cron: str, timezone_name: str, chat_id: str
+        self, *, name: str, prompt: str, cron: str, timezone_name: str, chat_id: str,
+        worker: str = "codex",
     ) -> ScheduledTask:
         run_at = next_run(cron, timezone_name)
         now = utc_text(utc_now())
@@ -164,9 +186,10 @@ class SchedulerStore:
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO scheduled_tasks
-                (id,name,prompt,cron,timezone,chat_id,enabled,next_run_at,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,1,?,?,?)""",
-                (task_id, name, prompt, cron, timezone_name, chat_id, utc_text(run_at), now, now),
+                (id,name,prompt,cron,timezone,chat_id,worker,enabled,next_run_at,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,1,?,?,?)""",
+                (task_id, name, prompt, cron, timezone_name, chat_id, self._worker(worker),
+                 utc_text(run_at), now, now),
             )
         return self.get_task(task_id)
 
@@ -186,7 +209,7 @@ class SchedulerStore:
 
     def update_task(
         self, task_id: str, *, name: str, prompt: str, cron: str,
-        timezone_name: str, chat_id: str
+        timezone_name: str, chat_id: str, worker: str = "codex"
     ) -> ScheduledTask:
         task = self.get_task(task_id)
         run_at = next_run(cron, timezone_name) if task.enabled else None
@@ -194,10 +217,10 @@ class SchedulerStore:
         with self._connect() as conn:
             conn.execute(
                 """UPDATE scheduled_tasks
-                SET name=?,prompt=?,cron=?,timezone=?,chat_id=?,next_run_at=?,updated_at=?
+                SET name=?,prompt=?,cron=?,timezone=?,chat_id=?,worker=?,next_run_at=?,updated_at=?
                 WHERE id=?""",
                 (
-                    name, prompt, cron, timezone_name, chat_id,
+                    name, prompt, cron, timezone_name, chat_id, self._worker(worker),
                     utc_text(run_at) if run_at else None, now, task_id,
                 ),
             )

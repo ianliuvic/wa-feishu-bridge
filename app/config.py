@@ -54,6 +54,35 @@ MARKETING_CHAT_ID = os.getenv("MARKETING_CHAT_ID", "").strip()
 CODEX_WORKER_URL = os.getenv("CODEX_WORKER_URL", "").rstrip("/")
 CODEX_WORKER_TOKEN = os.getenv("CODEX_WORKER_TOKEN", "")
 CODEX_RUN_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUN_TIMEOUT_SECONDS", "1800"))
+
+# Executor routing. Every scheduled task names the executor it runs on, and the
+# default keeps existing tasks on codex-worker so adding the column changes no
+# behaviour. The DSH worker is opt-in per task.
+DSH_WORKER_URL = os.getenv("DSH_WORKER_URL", "").rstrip("/")
+DSH_WORKER_TOKEN = os.getenv("DSH_WORKER_TOKEN", "")
+DEFAULT_WORKER = (os.getenv("DEFAULT_WORKER", "codex").strip() or "codex").lower()
+WORKER_NAMES = ("codex", "dsh")
+
+
+def worker_endpoint(name: str | None = None) -> tuple[str, str, str]:
+    """Resolve an executor name to (name, base_url, token).
+
+    @param name - executor from the task row; None/blank uses DEFAULT_WORKER.
+    @returns the normalized name, its base URL, and its bearer token.
+    @throws RuntimeError when the name is unknown or unconfigured, so a
+        misconfigured task fails loudly instead of silently falling back.
+    """
+    key = (name or DEFAULT_WORKER).strip().lower() or DEFAULT_WORKER
+    if key == "codex":
+        url, token = CODEX_WORKER_URL, CODEX_WORKER_TOKEN
+    elif key == "dsh":
+        url, token = DSH_WORKER_URL, DSH_WORKER_TOKEN
+    else:
+        raise RuntimeError(f"unknown executor {key!r}; expected one of {WORKER_NAMES}")
+    if not url or not token:
+        raise RuntimeError(f"executor {key!r} is not configured")
+    return key, url, token
+
 BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", "https://wa-bridge.yiswim.cloud").rstrip("/")
 ATTACHMENT_DIR = os.getenv("ATTACHMENT_DIR", "/data/pending-attachments")
 ATTACHMENT_TTL_SECONDS = max(30, int(os.getenv("ATTACHMENT_TTL_SECONDS", "120")))

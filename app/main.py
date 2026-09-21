@@ -42,6 +42,11 @@ from .config import (
     CODEX_RUN_TIMEOUT_SECONDS,
     CODEX_WORKER_TOKEN,
     CODEX_WORKER_URL,
+    DEFAULT_WORKER,
+    DSH_WORKER_TOKEN,
+    DSH_WORKER_URL,
+    WORKER_NAMES,
+    worker_endpoint,
     EVOLUTION_API_KEY,
     EVOLUTION_BASE_URL,
     FEISHU_APP_ID,
@@ -165,6 +170,8 @@ class ScheduledTaskCreate(BaseModel):
     cron: str = Field(min_length=5, max_length=200)
     timezone: str = Field(default=SCHEDULER_DEFAULT_TIMEZONE, min_length=1, max_length=100)
     chat_id: str | None = None
+    # Executor for this task; omitted means codex-worker, as before.
+    worker: str | None = Field(default=None, max_length=16)
 
 
 class ScheduledTaskUpdate(BaseModel):
@@ -173,6 +180,7 @@ class ScheduledTaskUpdate(BaseModel):
     cron: str = Field(min_length=5, max_length=200)
     timezone: str = Field(min_length=1, max_length=100)
     chat_id: str = Field(min_length=1)
+    worker: str | None = Field(default=None, max_length=16)
 
 
 def require_scheduler_auth(authorization: str | None = Header(default=None)) -> None:
@@ -190,41 +198,91 @@ async def call_codex(
     input_files: list[str] | None = None,
     artifact_dir: str | None = None,
     run_id: str | None = None,
+    worker: str | None = None,
 ) -> dict:
-    if not CODEX_WORKER_URL or not CODEX_WORKER_TOKEN:
-        raise RuntimeError("Codex worker is not configured")
-    headers = {"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"}
+    """Run one task on the named executor.
+
+    codex-worker is called synchronously, exactly as before. The DSH worker is
+    submitted with async_mode and polled, because a long DSH run can outlive the
+    caller's connection: one was observed finishing on the worker after 737
+    seconds while the HTTP request had already been dropped.
+    """
+    endpoint, base_url, token = worker_endpoint(worker)
+    headers = {"Authorization": f"Bearer {token}"}
     body = {
         "prompt": prompt,
-        "session_id": session_id,
         "workspace": "/workspace",
-        "input_files": input_files or [],
     }
+    if endpoint == "codex":
+        # Only codex-worker implements resume and input files.
+        body["session_id"] = session_id
+        body["input_files"] = input_files or []
     if artifact_dir:
         body["artifact_dir"] = artifact_dir
     if run_id:
         body["run_id"] = run_id
+
     timeout = httpx.Timeout(CODEX_RUN_TIMEOUT_SECONDS + 30, connect=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{CODEX_WORKER_URL}/v1/runs", json=body, headers=headers)
-    if response.status_code >= 400:
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {}
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if isinstance(detail, dict):
-            message = str(detail.get("message") or "Codex execution failed")
-            raise CodexWorkerError(
-                response.status_code,
-                message,
-                session_id=detail.get("session_id"),
-                retryable=detail.get("retryable") is True,
-                log_dir=detail.get("log_dir"),
+        if endpoint == "dsh":
+            response = await client.post(
+                f"{base_url}/v1/runs", json={**body, "async_mode": True}, headers=headers
             )
-        message = str(detail or response.text[:1000] or "Codex execution failed")
-        raise CodexWorkerError(response.status_code, message)
+            if response.status_code >= 400:
+                _raise_worker_error(response)
+            submitted = response.json()
+            return await _poll_dsh(client, base_url, headers, submitted["run_id"])
+
+        response = await client.post(f"{base_url}/v1/runs", json=body, headers=headers)
+    if response.status_code >= 400:
+        _raise_worker_error(response)
     return response.json()
+
+
+async def _poll_dsh(
+    client: "httpx.AsyncClient", base_url: str, headers: dict, run_id: str
+) -> dict:
+    """Poll an async DSH run until it settles, then return its result."""
+    deadline = time.monotonic() + CODEX_RUN_TIMEOUT_SECONDS + 120
+    while time.monotonic() < deadline:
+        await asyncio.sleep(10)
+        try:
+            poll = await client.get(f"{base_url}/v1/runs/{run_id}", headers=headers)
+        except httpx.HTTPError:
+            # A dropped poll is not a failed run; the worker keeps going.
+            continue
+        if poll.status_code == 404:
+            raise RuntimeError(f"DSH worker lost run {run_id}")
+        if poll.status_code >= 400:
+            continue
+        record = poll.json()
+        status = record.get("status")
+        if status == "done":
+            return record.get("result") or {}
+        if status == "failed":
+            detail = record.get("error")
+            message = detail.get("message") if isinstance(detail, dict) else detail
+            # DSH cannot resume a session, so this is never retryable.
+            raise CodexWorkerError(502, str(message or "DSH execution failed"))
+    raise CodexWorkerError(504, "DSH execution timed out")
+
+
+def _raise_worker_error(response: "httpx.Response") -> None:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, dict):
+        raise CodexWorkerError(
+            response.status_code,
+            str(detail.get("message") or "Codex execution failed"),
+            session_id=detail.get("session_id"),
+            retryable=detail.get("retryable") is True,
+            log_dir=detail.get("log_dir"),
+        )
+    message = str(detail or response.text[:1000] or "Codex execution failed")
+    raise CodexWorkerError(response.status_code, message)
 
 
 def _marketing_prompt(
@@ -396,46 +454,62 @@ async def process_marketing_message(
             await asyncio.to_thread(attachment_store.cleanup_files, attachments)
 
 
-def _artifact_signature(path: str, expires: int) -> str:
-    payload = f"{path}\n{expires}".encode()
-    return hmac.new(CODEX_WORKER_TOKEN.encode(), payload, hashlib.sha256).hexdigest()
+def _artifact_signature(path: str, expires: int, worker: str = "") -> str:
+    """Sign an artifact path, optionally bound to a specific executor.
+
+    The worker is part of the signed payload because both workers now expose a
+    /workspace/codex-artifacts tree and a path alone no longer identifies which
+    one holds the file. The HMAC key stays CODEX_WORKER_TOKEN so links issued
+    before this change remain verifiable.
+
+    A link generated before executor routing carries no worker and is verified
+    against the legacy payload, which keeps already-delivered 7-day links valid.
+    """
+    payload = f"{path}\n{expires}" if not worker else f"{worker}\n{path}\n{expires}"
+    return hmac.new(CODEX_WORKER_TOKEN.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
-def _artifact_link(path: str) -> str:
+def _artifact_link(path: str, worker: str = "") -> str:
     expires = int(time.time()) + 7 * 24 * 60 * 60
-    signature = _artifact_signature(path, expires)
-    return (
+    signature = _artifact_signature(path, expires, worker)
+    link = (
         f"{BRIDGE_PUBLIC_URL}/api/codex/artifact?path={quote(path, safe='')}"
         f"&expires={expires}&sig={signature}"
     )
+    if worker:
+        link += f"&worker={quote(worker, safe='')}"
+    return link
 
 
-async def _fetch_codex_artifact(path: str) -> tuple[bytes, str]:
-    headers = {"Authorization": f"Bearer {CODEX_WORKER_TOKEN}"}
+async def _fetch_codex_artifact(path: str, worker: str | None = None) -> tuple[bytes, str]:
+    _, base_url, token = worker_endpoint(worker)
+    headers = {"Authorization": f"Bearer {token}"}
     encoded_path = quote(path, safe="/")
     timeout = httpx.Timeout(180, connect=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(
-            f"{CODEX_WORKER_URL}/v1/artifacts/{encoded_path}", headers=headers
+            f"{base_url}/v1/artifacts/{encoded_path}", headers=headers
         )
     if response.status_code >= 400:
         raise RuntimeError(f"Codex artifact HTTP {response.status_code}")
     return response.content, response.headers.get("content-type", "application/octet-stream")
 
 
-async def deliver_codex_artifacts(chat_id: str, artifacts: list[dict]) -> list[str]:
+async def deliver_codex_artifacts(
+    chat_id: str, artifacts: list[dict], worker: str | None = None
+) -> list[str]:
     notes: list[str] = []
     for artifact in artifacts[:20]:
         path = str(artifact.get("path") or "")
         name = str(artifact.get("name") or "artifact")
         mime_type = str(artifact.get("mime_type") or "application/octet-stream")
         size = int(artifact.get("size") or 0)
-        link = _artifact_link(path) if path and BRIDGE_PUBLIC_URL else ""
+        link = _artifact_link(path, worker or "") if path and BRIDGE_PUBLIC_URL else ""
         try:
             limit = IMAGE_MAX_BYTES if mime_type.startswith("image/") else DOC_MAX_BYTES
             if size > limit:
                 raise RuntimeError(f"文件大小 {_fmt_size(size)} 超过飞书上传限制")
-            data, detected_type = await _fetch_codex_artifact(path)
+            data, detected_type = await _fetch_codex_artifact(path, worker)
             mime_type = detected_type.split(";", 1)[0] or mime_type
             if mime_type.startswith("image/"):
                 image_key = await asyncio.to_thread(feishu.upload_image, data, mime_type)
@@ -474,6 +548,7 @@ async def run_scheduled_task(task, run_id: str) -> None:
                 prompt,
                 artifact_dir=artifact_dir,
                 run_id=f"{task.id}-{run_id}-attempt-1",
+                worker=getattr(task, "worker", None),
             )
         except CodexWorkerError as first_error:
             if not (first_error.retryable and first_error.session_id):
@@ -492,6 +567,7 @@ async def run_scheduled_task(task, run_id: str) -> None:
                 session_id=first_error.session_id,
                 artifact_dir=artifact_dir,
                 run_id=f"{task.id}-{run_id}-attempt-2",
+                worker=getattr(task, "worker", None),
             )
         answer = (result.get("response") or "Codex 未返回文本结果。").strip()
         raw_artifacts = result.get("artifacts") or []
@@ -503,7 +579,8 @@ async def run_scheduled_task(task, run_id: str) -> None:
             task.prompt, raw_artifacts
         )
         delivery_notes = (
-            await deliver_codex_artifacts(task.chat_id, artifacts) if artifacts else []
+            await deliver_codex_artifacts(task.chat_id, artifacts, getattr(task, "worker", None))
+            if artifacts else []
         )
         if md_only:
             # MD-only means "one report file instead of a pile of artefacts", not
@@ -699,15 +776,23 @@ async def health():
 
 
 @app.get("/api/codex/artifact")
-async def download_codex_artifact(path: str, expires: int, sig: str) -> Response:
-    """Proxy a worker artifact through a short-lived signed public link."""
+async def download_codex_artifact(
+    path: str, expires: int, sig: str, worker: str = ""
+) -> Response:
+    """Proxy a worker artifact through a short-lived signed public link.
+
+    `worker` is absent on links issued before executor routing existed; those
+    were signed over the path alone and resolve to codex-worker.
+    """
     now = int(time.time())
     if expires < now or expires > now + 8 * 24 * 60 * 60:
         raise HTTPException(status_code=403, detail="artifact link expired")
-    expected = _artifact_signature(path, expires)
+    if worker and worker not in WORKER_NAMES:
+        raise HTTPException(status_code=400, detail="unknown executor")
+    expected = _artifact_signature(path, expires, worker)
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="invalid artifact signature")
-    data, media_type = await _fetch_codex_artifact(path)
+    data, media_type = await _fetch_codex_artifact(path, worker or None)
     name = path.rsplit("/", 1)[-1] or "artifact"
     return Response(
         content=data,
@@ -722,16 +807,46 @@ async def list_scheduled_tasks():
 
 
 @app.get("/api/codex/health", dependencies=[Depends(require_scheduler_auth)])
-async def codex_worker_health():
-    if not CODEX_WORKER_URL:
-        raise HTTPException(status_code=503, detail="CODEX_WORKER_URL is not configured")
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{CODEX_WORKER_URL}/health")
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Codex worker unavailable: {exc}") from exc
+async def codex_worker_health(worker: str = ""):
+    """Report configured executors, or one when ?worker= is given.
+
+    With executor routing in place an operator needs to see both sides: which
+    workers are configured, which are reachable, and how the scheduled tasks are
+    distributed between them.
+    """
+    configured = {
+        "codex": bool(CODEX_WORKER_URL and CODEX_WORKER_TOKEN),
+        "dsh": bool(DSH_WORKER_URL and DSH_WORKER_TOKEN),
+    }
+    wanted = [worker.strip().lower()] if worker.strip() else [
+        name for name in WORKER_NAMES if configured[name]
+    ]
+    for name in wanted:
+        if name not in WORKER_NAMES:
+            raise HTTPException(status_code=400, detail=f"unknown executor {name!r}")
+
+    result: dict = {"default_worker": DEFAULT_WORKER, "configured": configured, "workers": {}}
+    counts: dict[str, int] = {}
+    for task in scheduler_store.list_tasks():
+        key = getattr(task, "worker", "codex") or "codex"
+        counts[key] = counts.get(key, 0) + 1
+    result["task_counts"] = counts
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for name in wanted:
+            if not configured[name]:
+                result["workers"][name] = {"configured": False}
+                continue
+            _, base_url, _ = worker_endpoint(name)
+            try:
+                response = await client.get(f"{base_url}/health")
+                response.raise_for_status()
+                result["workers"][name] = {"configured": True, "reachable": True,
+                                           "health": response.json()}
+            except Exception as exc:  # noqa: BLE001
+                result["workers"][name] = {"configured": True, "reachable": False,
+                                           "error": str(exc)[:200]}
+    return result
 
 
 @app.post("/api/scheduler/tasks", dependencies=[Depends(require_scheduler_auth)])
@@ -746,6 +861,7 @@ async def create_scheduled_task(body: ScheduledTaskCreate):
             cron=body.cron.strip(),
             timezone_name=body.timezone.strip(),
             chat_id=chat_id,
+            worker=(body.worker or "codex"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -754,7 +870,7 @@ async def create_scheduled_task(body: ScheduledTaskCreate):
 
 @app.put("/api/scheduler/tasks/{task_id}", dependencies=[Depends(require_scheduler_auth)])
 async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
-    _task_or_404(task_id)
+    existing = _task_or_404(task_id)
     try:
         task = scheduler_store.update_task(
             task_id,
@@ -763,6 +879,7 @@ async def update_scheduled_task(task_id: str, body: ScheduledTaskUpdate):
             cron=body.cron.strip(),
             timezone_name=body.timezone.strip(),
             chat_id=body.chat_id.strip(),
+            worker=(body.worker or getattr(existing, "worker", "codex")),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

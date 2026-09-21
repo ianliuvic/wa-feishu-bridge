@@ -37,7 +37,17 @@ def request(method: str, path: str, data: dict | None = None, binary: bool = Fal
         base + path,
         data=body,
         method=method,
-        headers={"Authorization": f"Bearer {key}", "Accept": "application/json", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            # Cloudflare in front of reddit-ops answers 1010
+            # (browser_signature_banned) to urllib's default signature, before
+            # the request reaches API auth. Every other skill client in this
+            # repository already sends an explicit agent string for that
+            # reason; this was the only one missing it.
+            "User-Agent": "Codex-Reddit-Ops/1.0 curl-compatible",
+        },
     )
     try:
         with urlopen(req, timeout=120) as response:
