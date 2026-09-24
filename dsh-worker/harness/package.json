@@ -1,7 +1,7 @@
-﻿{
+{
   "name": "dsh-worker-harness",
   "private": true,
-  "description": "Pins the whole dsh dependency tree; installed with npm ci.",
+  "description": "Pins the whole dsh dependency tree; the image installs this with npm ci. Refresh deliberately with: npm install --package-lock-only --ignore-scripts",
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.5-rc.3"
   }
