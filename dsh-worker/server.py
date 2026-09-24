@@ -52,6 +52,44 @@ RUN_TIMEOUT_SECONDS = max(60, int(os.getenv("DSH_RUN_TIMEOUT_SECONDS", "1800")))
 # one positional argument, so reject anything that cannot survive that limit.
 MAX_PROMPT_BYTES = max(1024, int(os.getenv("DSH_MAX_PROMPT_BYTES", "120000")))
 ARTIFACT_DIR_NAME = os.getenv("DSH_ARTIFACT_DIR_NAME", "dsh-artifacts").strip() or "dsh-artifacts"
+# A run streams provider reasoning to stderr, so a long run can produce a lot of
+# output. Only the tail is kept: it is what tells you where a killed run stopped.
+STREAM_TAIL_LIMIT = max(64 * 1024, int(os.getenv("DSH_STREAM_TAIL_BYTES", str(8 * 1024 * 1024))))
+
+
+class _TailBuffer:
+    """Collect stream output while keeping only the most recent bytes.
+
+    ``asyncio.wait_for(process.communicate())`` loses everything the process had
+    already written when the timeout fires, which is why a timed-out run used to
+    leave empty logs and no way to see how far it got.
+    """
+
+    def __init__(self, limit: int = STREAM_TAIL_LIMIT) -> None:
+        self._chunks: list[bytes] = []
+        self._size = 0
+        self._limit = limit
+        self._truncated = False
+
+    def write(self, chunk: bytes) -> None:
+        self._chunks.append(chunk)
+        self._size += len(chunk)
+        while self._size > self._limit and len(self._chunks) > 1:
+            self._size -= len(self._chunks.pop(0))
+            self._truncated = True
+
+    @property
+    def truncated(self) -> bool:
+        return self._truncated
+
+    def text(self) -> str:
+        body = b"".join(self._chunks).decode("utf-8", errors="replace")
+        if self._truncated:
+            return "…[earlier output dropped to bound memory]…\n" + body
+        return body
+
+    def tail(self, chars: int = 2000) -> str:
+        return self.text()[-chars:]
 
 app = FastAPI(title="DSH Worker API", version="1.1.0")
 _run_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
@@ -273,32 +311,78 @@ async def _execute(req: RunRequest, run_id: str | None = None) -> RunResponse:
         stderr=asyncio.subprocess.PIPE,
         env=process_env,
     )
+
+    stdout_buffer = _TailBuffer()
+    stderr_buffer = _TailBuffer()
+
+    async def _drain(stream: asyncio.StreamReader | None, buffer: _TailBuffer) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            buffer.write(chunk)
+
+    drains = [
+        asyncio.create_task(_drain(process.stdout, stdout_buffer)),
+        asyncio.create_task(_drain(process.stderr, stderr_buffer)),
+    ]
+    timed_out = False
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            process.communicate(), timeout=RUN_TIMEOUT_SECONDS
-        )
+        await asyncio.wait_for(process.wait(), timeout=RUN_TIMEOUT_SECONDS)
     except TimeoutError:
+        timed_out = True
         process.kill()
-        await process.wait()
-        _write_run_logs(
+    await process.wait()
+    await asyncio.gather(*drains, return_exceptions=True)
+
+    stdout = stdout_buffer.text()
+    stderr = stderr_buffer.text()
+    response = stdout.strip()
+
+    if timed_out:
+        elapsed = round(time.monotonic() - started_at, 3)
+        log_dir = _write_run_logs(
             workspace,
             run_id,
-            stdout="",
-            stderr="",
+            stdout=stdout,
+            stderr=stderr,
             metadata={
                 "run_id": run_id,
                 "returncode": None,
                 "retryable": False,
                 "error": "timeout",
                 "timeout_seconds": RUN_TIMEOUT_SECONDS,
-                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                "elapsed_seconds": elapsed,
+                "stdout_truncated": stdout_buffer.truncated,
+                "stderr_truncated": stderr_buffer.truncated,
             },
         )
-        raise HTTPException(status_code=504, detail="DSH execution timed out") from None
-
-    stdout = stdout_b.decode("utf-8", errors="replace")
-    stderr = stderr_b.decode("utf-8", errors="replace")
-    response = stdout.strip()
+        logger.error(
+            "DSH run timed out run_id=%s elapsed=%.1fs log_dir=%s stdout_tail=%s stderr_tail=%s",
+            run_id,
+            elapsed,
+            log_dir,
+            stdout_buffer.tail(600),
+            stderr_buffer.tail(600),
+        )
+        # The tail travels with the error so a timeout can be diagnosed from the
+        # run record alone, without shell access to the worker.
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "message": f"DSH execution timed out after {RUN_TIMEOUT_SECONDS}s",
+                "session_id": None,
+                "retryable": False,
+                "run_id": run_id,
+                "log_dir": log_dir,
+                "returncode": None,
+                "elapsed_seconds": elapsed,
+                "stdout_tail": stdout_buffer.tail(2000),
+                "stderr_tail": stderr_buffer.tail(2000),
+            },
+        )
 
     if process.returncode != 0:
         message = _failure_message(stderr, stdout)
@@ -502,12 +586,22 @@ async def download_artifact(artifact_path: str) -> FileResponse:
     Resolving it under the artifacts root again doubled the prefix and 404'd
     every fetch. Both forms are accepted, and serving stays confined to the
     artifacts root.
+
+    Run transcripts live under ``dsh-run-logs/`` instead, and are served too:
+    otherwise a killed run can only be inspected with shell access, and the
+    in-memory record is lost when the worker restarts.
     """
-    artifact_root = (DEFAULT_WORKSPACE / ARTIFACT_DIR_NAME).resolve()
     relative = artifact_path.lstrip("/")
     prefix = f"{ARTIFACT_DIR_NAME}/"
     if relative.startswith(prefix):
         relative = relative[len(prefix):]
+    if relative.startswith("dsh-run-logs/"):
+        logs_root = (DEFAULT_WORKSPACE / "dsh-run-logs").resolve()
+        candidate = (DEFAULT_WORKSPACE / relative).resolve()
+        if logs_root not in candidate.parents or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="artifact not found")
+        return FileResponse(candidate, filename=candidate.name)
+    artifact_root = (DEFAULT_WORKSPACE / ARTIFACT_DIR_NAME).resolve()
     candidate = (artifact_root / relative).resolve()
     if artifact_root not in candidate.parents or not candidate.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")

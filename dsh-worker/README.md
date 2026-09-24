@@ -44,6 +44,15 @@ creates or changes are reported back as artifacts.
   run-log evidence at `/workspace/dsh-run-logs/<run_id>/stderr.log`.
 - **Exit codes.** 0 means the task completed; 1 means it aborted or errored, and the
   server maps that to HTTP 502 with the extracted `dsh: <code>: <message>`.
+- **Timeouts are diagnostic.** A run killed at `DSH_RUN_TIMEOUT_SECONDS` returns HTTP
+  504 with a detail object carrying `message`, `run_id`, `log_dir`, `elapsed_seconds`
+  and the last 2000 characters of `stdout_tail` / `stderr_tail`, so the failure site
+  is visible from the run record alone. The full transcript stays at
+  `dsh-run-logs/<run_id>/{stdout.txt,stderr.log,metadata.json}` and can be downloaded
+  through `GET /v1/artifacts/dsh-run-logs/<run_id>/stdout.txt`. Output is drained
+  incrementally into a bounded tail buffer (8 MiB per stream, `DSH_STREAM_TAIL_BYTES`)
+  because `communicate()` discarded everything a killed process had already written.
+  A timed-out run is never retried: DSH may already have written to the outside world.
 - **No LinkedIn/OAuth surface.** Those endpoints in `codex-worker` are Codex-worker
   specific and are not reproduced here.
 
@@ -105,6 +114,7 @@ Two consequences worth knowing:
 | `DSH_WORKSPACE` | `/workspace` | Root the worker will run inside |
 | `DSH_MAX_CONCURRENT_RUNS` | `2` | In-process run semaphore |
 | `DSH_RUN_TIMEOUT_SECONDS` | `1800` | Per-run wall clock before the process is killed |
+| `DSH_STREAM_TAIL_BYTES` | `8388608` | Per-stream output kept in memory for logs and failure details |
 | `DSH_MAX_PROMPT_BYTES` | `120000` | Rejected above this, because the task travels as one argv entry |
 
 `DSH_PERMISSION_MODE=danger-full-access` is load-bearing for unattended operation:
