@@ -14,18 +14,19 @@ RUN apt-get update \
 
 # Pin the harness: the worker's HTTP contract is written against dsh 0.1.x, and
 # an unpinned global install would silently change behaviour on every rebuild.
-ARG DSH_VERSION=0.1.5-rc.2
+#
+# The umbrella package carries `^` ranges on its sub-packages, so pinning it is
+# not enough: when 0.1.5-rc.3 was published, a rebuild paired a 0.1.5-rc.2
+# umbrella with rc.3 sub-packages and every run died at boot with
+# "plugin tree failed to load: @deepseek-ai/dsh-sandbox-local could not be
+# resolved" while --dump-config kept passing. The version is therefore pinned to
+# the newest release whose whole tree resolves together, and the check below
+# fails the build if a future pre-release reintroduces the mix.
+ARG DSH_VERSION=0.1.5-rc.3
 RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" \
-    && npm install -g "@deepseek-ai/dsh-sandbox-local@${DSH_VERSION}" \
     && dsh --version
-
-# The profile resolves its plugin bundles through DSH_MODULE_FALLBACK and, for
-# anything not installed alongside the profile, through the global tree. Node
-# does not search the global root by default, so a plugin that only exists there
-# failed to resolve at run time ("plugin tree failed to load") even though
-# --dump-config succeeded. Installing sandbox-local explicitly and exposing the
-# global root makes the build fail loudly if it is ever unavailable again.
-ENV NODE_PATH=/usr/local/lib/node_modules
+COPY dsh-worker/check_versions.mjs /opt/dsh-worker/check_versions.mjs
+RUN node /opt/dsh-worker/check_versions.mjs
 
 # The skill scripts import these directly. google-ads-mcp pulls in the
 # google-ads / google-auth / protobuf stack that google-ads and the wearhongxiu
