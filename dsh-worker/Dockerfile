@@ -70,7 +70,7 @@ WORKDIR /workspace
 # the image is proven to compose before it ever ships.
 RUN dsh --profile headless --dump-config > /dev/null \
     && dsh --profile headless --help > /dev/null \
-    && test -f /root/.dsh/profiles/headless/package.json
+    && test -f "${DSH_HOME}/profiles/headless/package.json"
 
 RUN mkdir -p /opt/dsh-worker
 COPY dsh-worker/server.py /opt/dsh-worker/server.py
