@@ -25,6 +25,22 @@ python scripts/wp.py get /wp/v2/media --all --param search=mockup --fields id,sl
 
 Use `--all` only for list endpoints that expose WordPress pagination headers.
 
+## Product variant labels
+
+Correct a wrong or unreadable colour variant name. This writes a collector
+override (so re-captures cannot revert it) and the live WordPress product:
+
+```powershell
+python scripts/variant_rename.py inspect SKG166
+python scripts/variant_rename.py apply SKG166 --source 9007 --label "Tropical Palm Print"
+python scripts/variant_rename.py apply SKG166 --source 9007 --label "Tropical Palm Print" --apply
+python scripts/variant_rename.py apply SKG166 --source 9007 --label "Tropical Palm Print" --apply --purge-cache
+python scripts/variant_rename.py revert SKG166 --source 9007 --apply
+```
+
+`inspect` is read-only. `apply` and `revert` are dry runs until `--apply` is
+passed. Read [variant-rename.md](variant-rename.md) before using them.
+
 ## Create or update data
 
 ```powershell

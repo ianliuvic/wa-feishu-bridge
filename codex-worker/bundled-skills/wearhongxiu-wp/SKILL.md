@@ -1,6 +1,6 @@
 ---
 name: wearhongxiu-wp
-description: Inspect and manage wearhongxiu.com WordPress, export selected Wearhongxiu products as PDF catalogs, operate website RAG and Google Search Console, and run SEO or end-to-end publishing workflows. Use only for Wearhongxiu; do not use for paintsand.com, Shopify Admin, the shared POD backend, or the separate product RAG.
+description: Inspect and manage wearhongxiu.com WordPress, correct wrong or unreadable product variant names, export selected Wearhongxiu products as PDF catalogs, operate website RAG and Google Search Console, and run SEO or end-to-end publishing workflows. Use only for Wearhongxiu; do not use for paintsand.com, Shopify Admin, the shared POD backend, or the separate product RAG.
 ---
 
 # Wearhongxiu WordPress
@@ -70,6 +70,19 @@ all pages with `pdftoppm`, and visually check the cover, contents, every product
 page, and the contact page before delivery. Report any identifier that cannot
 be resolved rather than presenting an incomplete catalog as complete. Exact
 command syntax is in [references/commands.md](references/commands.md).
+
+## Product variant labels
+
+When a Wearhongxiu product shows a wrong or unreadable colour variant name — a
+bare 1688 merchant code such as `9007`, or source-language text — use
+`scripts/variant_rename.py`. Correcting the WordPress product alone is not
+durable: the label is regenerated from the captured 1688 SKU options on every
+capture, translation refresh, and swatch repair. The command stores a display
+override on the collector product (which every publication path then applies)
+and writes the corrected label into the live WordPress product without
+re-uploading media. `inspect` is read-only; `apply` and `revert` write only with
+`--apply`. Read
+[references/variant-rename.md](references/variant-rename.md) before using it.
 
 ## Website knowledge base
 
@@ -190,7 +203,9 @@ writing, illustrating, publishing, or diagnosing an Industry News post. Read
 request concerns POD products, inquiries, Stripe/sample ordering, WPCode, or
 menus/templates. Also read it when resolving a product from a style number,
 WordPress product URL, slug, or post ID; use the exact authenticated resolver
-documented there instead of title search.
+documented there instead of title search. Read
+[references/variant-rename.md](references/variant-rename.md) when a product's
+colour variant name is wrong or unreadable and has to be corrected durably.
 
 ## Deployment notes
 
