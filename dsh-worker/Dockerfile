@@ -45,7 +45,17 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 COPY codex-worker/bundled-skills/ /root/.codex/skills/
 COPY codex-worker/configure_google_ads.py /opt/dsh-worker/configure_google_ads.py
 
-ENV DSH_HOME=/root/.dsh
+# The harness home is baked into the image rather than living on a persistent
+# volume. A DSH profile resolves its bundles through an install that belongs to
+# the harness build, so a volume-mounted home outlives the image and drifts away
+# from it: every run then dies at boot with
+#   "plugin tree failed to load: <plugin> could not be resolved"
+# while the static --dump-config check still passes, because plugins load per run
+# and not when the config is dumped. That is exactly what happened here after a
+# rebuild. A one-shot worker needs no state across runs (DSH cannot resume a
+# session), so the home belongs in the image. Any storage still mounted at the
+# old path is ignored.
+ENV DSH_HOME=/opt/dsh-home
 ENV DSH_PROFILE=headless
 # danger-full-access also pins the approval policy to "never" (see the dsh-base
 # approval row), which is what lets an unattended run use shell and file tools.
