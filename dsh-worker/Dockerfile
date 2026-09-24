@@ -16,7 +16,16 @@ RUN apt-get update \
 # an unpinned global install would silently change behaviour on every rebuild.
 ARG DSH_VERSION=0.1.5-rc.2
 RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" \
+    && npm install -g "@deepseek-ai/dsh-sandbox-local@${DSH_VERSION}" \
     && dsh --version
+
+# The profile resolves its plugin bundles through DSH_MODULE_FALLBACK and, for
+# anything not installed alongside the profile, through the global tree. Node
+# does not search the global root by default, so a plugin that only exists there
+# failed to resolve at run time ("plugin tree failed to load") even though
+# --dump-config succeeded. Installing sandbox-local explicitly and exposing the
+# global root makes the build fail loudly if it is ever unavailable again.
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 # The skill scripts import these directly. google-ads-mcp pulls in the
 # google-ads / google-auth / protobuf stack that google-ads and the wearhongxiu
