@@ -12,21 +12,28 @@ RUN apt-get update \
         python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin the harness: the worker's HTTP contract is written against dsh 0.1.x, and
-# an unpinned global install would silently change behaviour on every rebuild.
+# The harness tree is installed from a committed lockfile.
 #
-# The umbrella package carries `^` ranges on its sub-packages, so pinning it is
-# not enough: when 0.1.5-rc.3 was published, a rebuild paired a 0.1.5-rc.2
-# umbrella with rc.3 sub-packages and every run died at boot with
+# Pinning only the umbrella package was not enough: it carries `^` ranges on its
+# sub-packages, so when 0.1.5-rc.3 was published the next rebuild paired an
+# rc.2 umbrella with rc.3 sub-packages. Every run then died at boot with
 # "plugin tree failed to load: @deepseek-ai/dsh-sandbox-local could not be
-# resolved" while --dump-config kept passing. The version is therefore pinned to
-# the newest release whose whole tree resolves together, and the check below
-# fails the build if a future pre-release reintroduces the mix.
-ARG DSH_VERSION=0.1.5-rc.3
-RUN npm install -g "@deepseek-ai/dsh@${DSH_VERSION}" \
+# resolved" while --dump-config kept passing, because plugins load per run and
+# not while the config is dumped.
+#
+# `npm ci` installs exactly the locked tree (585 packages, integrity-checked),
+# including every dsh-* sub-package, so a rebuild is reproducible and an
+# upstream release cannot reach the worker until the lockfile is deliberately
+# refreshed:
+#   cd dsh-worker/harness && npm install --package-lock-only --ignore-scripts
+# The version check below still fails the build if a mixed tree ever appears.
+COPY dsh-worker/harness/package.json dsh-worker/harness/package-lock.json /opt/dsh/
+RUN cd /opt/dsh \
+    && npm ci --no-audit --no-fund \
+    && ln -sf /opt/dsh/node_modules/.bin/dsh /usr/local/bin/dsh \
     && dsh --version
 COPY dsh-worker/check_versions.mjs /opt/dsh-worker/check_versions.mjs
-RUN node /opt/dsh-worker/check_versions.mjs
+RUN node /opt/dsh-worker/check_versions.mjs /opt/dsh/node_modules/@deepseek-ai/dsh
 
 # The skill scripts import these directly. google-ads-mcp pulls in the
 # google-ads / google-auth / protobuf stack that google-ads and the wearhongxiu
