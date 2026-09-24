@@ -53,8 +53,31 @@ if [ -z "${DSH_WORKER_TOKEN:-}" ]; then
     echo "WARNING: DSH_WORKER_TOKEN is not set; /v1/runs will reject every caller." >&2
 fi
 
+# $DSH_HOME is a persistent volume, so a profile materialised by an earlier
+# harness survives while the installed harness changes underneath it. When the
+# two drift, every run dies at boot with
+#   "plugin tree failed to load: <plugin> could not be resolved"
+# even though the static --dump-config check passes, because plugins are loaded
+# per run rather than when the config is dumped.
+#
+# The profile is auto-initialised from the installed package (the image build
+# relies on exactly that), and operator customisation belongs in
+# cordis.patch.yml, so re-materialise it here and keep the previous copy.
+PROFILE="${DSH_PROFILE:-headless}"
+PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
+if [ -d "$PROFILE_DIR" ]; then
+    STAMP="$(date +%Y%m%d%H%M%S)"
+    mv "$PROFILE_DIR" "$PROFILE_DIR.stale-$STAMP"
+    echo "dsh-worker: re-materialising profile '$PROFILE'; previous copy at $PROFILE_DIR.stale-$STAMP" >&2
+    # Keep the volume from filling up with superseded profiles.
+    ls -1dt "$PROFILE_DIR".stale-* 2>/dev/null | tail -n +3 | while read -r old; do
+        rm -rf "$old"
+    done
+fi
+
 # Prove the profile still composes in this container before accepting traffic.
 dsh --profile "${DSH_PROFILE:-headless}" --dump-config > /dev/null
+test -f "$DSH_HOME/profiles/${DSH_PROFILE:-headless}/package.json"
 
 echo "DSH Worker API ready: dsh $(dsh --version)"
 exec uvicorn --app-dir /opt/dsh-worker server:app --host 0.0.0.0 --port 80
