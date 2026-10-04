@@ -43,8 +43,38 @@ class Week:
     label: str
 
 
+# Fallback files for credentials the DSH harness scrubs out of shell
+# environments (it removes *_SECRET/*_TOKEN/*_KEY names and exposes the curated
+# subset through /root/.dsh-skill-credentials.env). Reading them here keeps
+# `check` and `run` deterministic on dsh-worker; on codex-worker the environment
+# is complete and these files simply do not exist.
+CREDENTIAL_FALLBACK_FILES = (
+    Path(os.getenv("DSH_SKILL_CREDENTIALS", "/root/.dsh-skill-credentials.env")),
+    Path.home() / ".zoho-api" / ".env",
+)
+
+
+def _fallback_env(name: str) -> str:
+    for path in CREDENTIAL_FALLBACK_FILES:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == name:
+                value = value.strip()
+                if value:
+                    return value
+    return ""
+
+
 def env(name: str, default: str = "") -> str:
-    return os.getenv(name, default).strip()
+    value = os.getenv(name, "").strip() or _fallback_env(name)
+    return (value or default).strip()
 
 
 def request(method: str, url: str, *, headers: dict[str, str] | None = None,
