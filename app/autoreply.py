@@ -1,10 +1,9 @@
 """Off-hours auto-reply: when a WhatsApp message arrives between 00:00-08:00
 (Asia/Shanghai), reply ONCE per customer per window with an LLM-generated
-short message in the customer's language (DeepSeek detects the language).
+short message in the customer's own language (DeepSeek detects the language).
 """
 
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 
 from .evolution import EvolutionClient, EvolutionMessage
@@ -17,25 +16,49 @@ SHANGHAI_TZ = timezone(timedelta(hours=8))
 SYSTEM_PROMPT = (
     "You are the WhatsApp after-hours assistant for Hongxiu Clothing. "
     "It is currently outside business hours (00:00-08:00 China Standard Time).\n"
-    "MANDATORY LANGUAGE RULE: Reply ONLY in English, regardless of the language used by the customer. "
-    "Never output Chinese, Spanish, or any other language.\n"
+    "MANDATORY LANGUAGE RULE: Detect the language of the customer's latest message and reply "
+    "in that SAME language (Spanish -> Spanish, Portuguese -> Portuguese, English -> English, etc.). "
+    "Never switch to English when the customer wrote in another language. "
+    "If the message has no detectable language (empty, emoji-only, or a non-text placeholder), "
+    "reply in English.\n"
     "Keep the reply to 1-2 short, polite sentences. Say that the message has been received, "
     "the team is currently resting, and the customer will receive a reply after 8:00 AM China time. "
     "Invite the customer to leave their requirements in the conversation. Do not add marketing content."
 )
 
-ENGLISH_FALLBACK = (
+FALLBACK_REPLY = (
     "Thanks for your message! Our team is currently resting and will reply after 8:00 AM China time. "
     "Please feel free to leave your requirements here in the meantime."
 )
 
+# EvolutionMessage.text collapses every non-text message into this placeholder.
+MEDIA_PLACEHOLDER = "[非文字消息]"
+MEDIA_INPUT_NOTE = (
+    "The customer sent a media message without text (image, video, audio, sticker or document). "
+    "Reply in English."
+)
 
-def _ensure_english(reply: str) -> str:
-    """Guarantee that an accidental Chinese model response is never sent."""
+
+def _ensure_reply(reply: str) -> str:
+    """Return the model reply untouched; fall back only when it is empty.
+
+    The reply language intentionally follows the customer's, so no
+    language-specific replacement happens here.
+    """
     reply = (reply or "").strip()
-    if not reply or re.search(r"[\u3400-\u9fff]", reply):
-        return ENGLISH_FALLBACK
-    return reply
+    return reply or FALLBACK_REPLY
+
+
+def _customer_text(evt: EvolutionMessage) -> str:
+    """Text handed to the model, with media turned into a neutral English note.
+
+    Using the Chinese placeholder for media would make the model infer Chinese
+    as the customer's language, so media gets an explicit English instruction.
+    """
+    text = (evt.text or "").strip()
+    if evt.media_type != "none" or text in ("", MEDIA_PLACEHOLDER):
+        return MEDIA_INPUT_NOTE
+    return text
 
 
 class AutoReplyManager:
@@ -86,8 +109,13 @@ class AutoReplyManager:
 
         # deepseek-v4-flash is a reasoning model: it first emits reasoning_content,
         # so max_tokens must leave headroom for the chain-of-thought + the reply.
-        reply = self.llm.chat(user_text=evt.text, system=SYSTEM_PROMPT, temperature=0.4, max_tokens=1024)
-        reply = _ensure_english(reply)
+        reply = self.llm.chat(
+            user_text=_customer_text(evt),
+            system=SYSTEM_PROMPT,
+            temperature=0.4,
+            max_tokens=1024,
+        )
+        reply = _ensure_reply(reply)
         self.evolution.send_text(evt.instance, evt.sender_phone, reply)
         self.mark_replied(evt.remote_jid)
         logger.info("auto-replied to %s (%s): %s", evt.remote_jid, evt.sender_phone, reply[:80])
