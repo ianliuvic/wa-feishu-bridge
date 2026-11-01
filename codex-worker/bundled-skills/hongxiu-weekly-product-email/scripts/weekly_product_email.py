@@ -29,6 +29,16 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 # button line up across the two columns no matter how the source image was shot.
 EMAIL_IMAGE_SIZE = (480, 640)
 EMAIL_IMAGE_QUALITY = 82
+# Text blocks are clamped and given a fixed height so the two cards in a row
+# line up: style number, title, description and the button all start at the
+# same offset regardless of how long the copy is.
+TITLE_MAX_CHARS = 58
+TITLE_HEIGHT = 81          # three lines at 21px/27px
+DESCRIPTION_MAX_CHARS = 104
+DESCRIPTION_HEIGHT = 66    # three lines at 14px/22px
+CLAMP_TRAILING_STOPWORDS = {
+    "a", "an", "the", "and", "or", "with", "for", "in", "of", "to", "on", "by", "at", "from", "as",
+}
 SECRET_ENV = (
     "COLLECTOR_API_KEY", "GITHUB_TOKEN", "COOLIFY_BASE_URL", "COOLIFY_API_TOKEN",
     "ZOHO_CLIENT_ID", "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN",
@@ -263,22 +273,39 @@ def sentence(text: str, maximum: int = 210) -> str:
     return value
 
 
+def clamp_text(text: str, maximum: int) -> str:
+    """Shorten text to a character budget, cutting on a word boundary."""
+    value = " ".join((text or "").split())
+    if len(value) <= maximum:
+        return value
+    cut = value[: maximum - 1].rsplit(" ", 1)[0].rstrip(" ,.;:-–—")
+    # Do not leave a dangling connector such as "… Bikini Set with…".
+    words = cut.split(" ")
+    while words and words[-1].lower() in CLAMP_TRAILING_STOPWORDS:
+        words.pop()
+    cut = " ".join(words).rstrip(" ,.;:-–—")
+    return (cut or value[: maximum - 1]) + "…"
+
+
 def render_products(products: list[dict[str, Any]]) -> str:
     rows: list[str] = []
     for offset in range(0, len(products), 2):
         cells: list[str] = []
         for product in products[offset:offset + 2]:
-            title = html.escape(str(product["title"]))
-            description = html.escape(sentence(str(product.get("description") or "")))
+            title = html.escape(clamp_text(str(product["title"]), TITLE_MAX_CHARS))
+            description = html.escape(clamp_text(
+                sentence(str(product.get("description") or "")), DESCRIPTION_MAX_CHARS))
             style = html.escape(str(product.get("style_no") or "New style"))
             image_url = html.escape(str(product["image_url"]), quote=True)
             product_url = html.escape(str(product["wp_url"]), quote=True)
             cells.append(f'''<td class="stack" width="50%" valign="top" style="width:50%;padding:0 8px 28px;">
 <a href="{product_url}" target="_blank"><img src="{image_url}" alt="{title}" width="250" height="333" style="display:block;width:100%;max-width:250px;height:auto;border:0;border-radius:8px;"></a>
-<p style="margin:13px 0 5px;font:700 11px/16px Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;color:#9B1B2E;">{style}</p>
-<h2 style="margin:0 0 8px;font:normal 21px/27px Georgia,serif;color:#1F1D1A;">{title}</h2>
-<p style="margin:0 0 14px;font:14px/22px Arial,sans-serif;color:#625D55;">{description}</p>
-<a href="{product_url}" target="_blank" style="font:700 13px/20px Arial,sans-serif;color:#9B1B2E;text-decoration:underline;">View product →</a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+<tr><td height="16" valign="top" style="height:16px;padding:13px 0 5px;"><p style="margin:0;font:700 11px/16px Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;color:#9B1B2E;">{style}</p></td></tr>
+<tr><td height="{TITLE_HEIGHT}" valign="top" style="height:{TITLE_HEIGHT}px;padding:0 0 8px;overflow:hidden;"><h2 style="margin:0;font:normal 21px/27px Georgia,serif;color:#1F1D1A;">{title}</h2></td></tr>
+<tr><td height="{DESCRIPTION_HEIGHT}" valign="top" style="height:{DESCRIPTION_HEIGHT}px;padding:0 0 14px;overflow:hidden;"><p style="margin:0;font:14px/22px Arial,sans-serif;color:#625D55;">{description}</p></td></tr>
+<tr><td height="20" valign="top" style="height:20px;"><a href="{product_url}" target="_blank" style="font:700 13px/20px Arial,sans-serif;color:#9B1B2E;text-decoration:underline;">View product →</a></td></tr>
+</table>
 </td>''')
         if len(cells) == 1:
             cells.append('<td class="stack" width="50%" style="width:50%;padding:0 8px 28px;"></td>')

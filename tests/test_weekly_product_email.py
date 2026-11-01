@@ -170,6 +170,30 @@ class WeeklyProductEmailTests(unittest.TestCase):
         self.assertEqual(list(files), ["campaigns/2026-W36-new-arrivals/images/A1-1.jpg"])
         self.assertEqual(len(warnings), 1)
 
+    def test_clamp_text_cuts_long_copy_on_a_word_boundary(self):
+        text = "Cream Botanical Floral Triangle Halter Bikini with Ruffle Trim and Tie-Side Bottoms"
+        clamped = weekly.clamp_text(text, weekly.TITLE_MAX_CHARS)
+        self.assertLessEqual(len(clamped), weekly.TITLE_MAX_CHARS)
+        self.assertTrue(clamped.endswith("…"))
+        self.assertFalse(clamped.rstrip("…").endswith(" "))
+        self.assertEqual(weekly.clamp_text("Short name", weekly.TITLE_MAX_CHARS), "Short name")
+
+    def test_render_uses_fixed_text_blocks(self):
+        period = weekly.resolve_week("2026-08-30")
+        long_title = "Cream Botanical Floral Triangle Halter Bikini with Ruffle Trim and Tie-Side Bottoms"
+        product = {
+            "title": long_title,
+            "description": "A long description " * 12,
+            "image_url": "https://example.test/image.jpg",
+            "wp_url": "https://example.test/product/",
+            "style_no": "TEST1",
+        }
+        rendered = weekly.render_products([product])
+        self.assertIn(f'height="{weekly.TITLE_HEIGHT}"', rendered)
+        self.assertIn(f'height="{weekly.DESCRIPTION_HEIGHT}"', rendered)
+        self.assertNotIn(long_title, rendered)
+        self.assertIn("…", rendered)
+
     def test_missing_zoho_campaign_is_recoverable(self):
         with patch.object(
             weekly,
