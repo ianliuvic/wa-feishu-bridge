@@ -27,6 +27,7 @@ The default reporting window is the complete seven-day interval from the previou
 - Never include a recipient name, recipient-name merge tag, or personalized salutation; inaccurate contact names can damage trust. Keep `$[LI:UNSUBSCRIBE]$` in every email.
 - Use the canonical footer returned by `render_footer()` in the bundled script. It must stay visually and textually aligned with `https://email.wearhongxiu.com/campaigns/2026-08-wholesale-swimwear/`: Hongxiu Clothing Co., Ltd.; `10-8A Tiexi Rd, Xingcheng, Liaoning, China`; wearhongxiu.com; service@wearhongxiu.com; WhatsApp `+86 177 1101 4152`; Privacy, Shipping, Refund, and Zoho unsubscribe links. Do not substitute an older phone number or shorten this footer.
 - Keep the hosted email table-based, mobile-friendly, and limited to publicly accessible wearhongxiu image and product URLs.
+- Every product card uses the same 3:4 image frame: the script downloads each card image, centre-crops it to 3:4, re-encodes it as JPEG (480x640, quality 82), commits it to `campaigns/<slug>/images/` in the email-campaign repository, and links the hosted copy. Never drop this step or point cards back at the raw source images — mixed aspect ratios push the style number, title and button out of alignment between the two columns. If one image cannot be downloaded, keep its original URL, record `image_warnings`, and still send the email.
 - Never print tokens, OAuth secrets, API keys, or complete credential responses.
 
 ## Commands

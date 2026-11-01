@@ -18,12 +18,17 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+# Every product card uses the same 3:4 image box, so the style number, title and
+# button line up across the two columns no matter how the source image was shot.
+EMAIL_IMAGE_SIZE = (480, 640)
+EMAIL_IMAGE_QUALITY = 82
 SECRET_ENV = (
     "COLLECTOR_API_KEY", "GITHUB_TOKEN", "COOLIFY_BASE_URL", "COOLIFY_API_TOKEN",
     "ZOHO_CLIENT_ID", "ZOHO_CLIENT_SECRET", "ZOHO_REFRESH_TOKEN",
@@ -191,6 +196,64 @@ def discover_products(week: Week, limit: int) -> list[dict[str, Any]]:
     return clean
 
 
+def image_key(product: dict[str, Any]) -> str:
+    """Stable, filesystem-safe name for one product's card image."""
+    style = re.sub(r"[^A-Za-z0-9_-]", "", str(product.get("style_no") or ""))
+    detail_id = re.sub(r"[^A-Za-z0-9_-]", "", str(product.get("product_detail_id") or ""))
+    if style and detail_id:
+        return f"{style}-{detail_id}"
+    if detail_id:
+        return detail_id
+    if style:
+        return style
+    seed = str(product.get("wp_url") or product.get("title") or "")
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def normalize_product_image(data: bytes) -> bytes:
+    """Crop any product photo to the shared 3:4 frame and encode it as JPEG."""
+    from PIL import Image, ImageOps
+
+    image = Image.open(BytesIO(data))
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    width, height = image.size
+    target = EMAIL_IMAGE_SIZE[0] / EMAIL_IMAGE_SIZE[1]
+    if width / height > target:
+        cropped_width = max(1, round(height * target))
+        left = (width - cropped_width) // 2
+        image = image.crop((left, 0, left + cropped_width, height))
+    elif width / height < target:
+        cropped_height = max(1, round(width / target))
+        # Bias the crop upward: product shots keep the model's head near the top.
+        top = round((height - cropped_height) * 0.3)
+        image = image.crop((0, top, width, top + cropped_height))
+    image = image.resize(EMAIL_IMAGE_SIZE, Image.LANCZOS)
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=EMAIL_IMAGE_QUALITY, optimize=True, progressive=True)
+    return buffer.getvalue()
+
+
+def prepare_images(week: Week, products: list[dict[str, Any]]
+                   ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[str]]:
+    """Download each card image, crop it to 3:4, and point the product at that copy."""
+    base = env("EMAIL_CAMPAIGN_BASE_URL", "https://email.wearhongxiu.com").rstrip("/")
+    files: dict[str, bytes] = {}
+    prepared: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for product in products:
+        key = image_key(product)
+        relative = f"campaigns/{week.slug}/images/{key}.jpg"
+        try:
+            _, raw, _ = request("GET", str(product["image_url"]), timeout=90)
+            files[relative] = normalize_product_image(raw)
+        except Exception as exc:  # one broken image must not block the whole email
+            warnings.append(f"{key}: {type(exc).__name__}")
+            prepared.append(product)
+            continue
+        prepared.append({**product, "image_url": f"{base}/{relative}"})
+    return prepared, files, warnings
+
+
 def sentence(text: str, maximum: int = 210) -> str:
     value = " ".join((text or "").split())
     match = re.match(r"^(.+?[.!?])(?:\s|$)", value)
@@ -211,7 +274,7 @@ def render_products(products: list[dict[str, Any]]) -> str:
             image_url = html.escape(str(product["image_url"]), quote=True)
             product_url = html.escape(str(product["wp_url"]), quote=True)
             cells.append(f'''<td class="stack" width="50%" valign="top" style="width:50%;padding:0 8px 28px;">
-<a href="{product_url}" target="_blank"><img src="{image_url}" alt="{title}" width="250" style="display:block;width:100%;max-width:250px;height:auto;border:0;border-radius:8px;"></a>
+<a href="{product_url}" target="_blank"><img src="{image_url}" alt="{title}" width="250" height="333" style="display:block;width:100%;max-width:250px;height:auto;border:0;border-radius:8px;"></a>
 <p style="margin:13px 0 5px;font:700 11px/16px Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;color:#9B1B2E;">{style}</p>
 <h2 style="margin:0 0 8px;font:normal 21px/27px Georgia,serif;color:#1F1D1A;">{title}</h2>
 <p style="margin:0 0 14px;font:14px/22px Arial,sans-serif;color:#625D55;">{description}</p>
@@ -312,6 +375,42 @@ def put_github_file(path: str, content: str, message: str) -> str:
     payload = request_json("PUT", f"{base}/repos/{repo}/contents/{encoded}",
                            headers=github_headers(), json_body=body)
     return payload.get("commit", {}).get("sha", "")
+
+
+def _git_api(path: str, method: str = "GET", body: Any = None) -> Any:
+    base = env("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
+    repo = env("EMAIL_CAMPAIGN_REPO", "ianliuvic/email-campaign")
+    return request_json(method, f"{base}/repos/{repo}{path}", headers=github_headers(), json_body=body)
+
+
+def _blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def put_github_files(files: dict[str, bytes], message: str) -> str:
+    """Commit several binary files in one commit, skipping unchanged content."""
+    if not files:
+        return ""
+    branch = env("EMAIL_CAMPAIGN_BRANCH", "main")
+    quoted = urllib.parse.quote(branch)
+    tree = _git_api(f"/git/trees/{quoted}?recursive=1")
+    existing = {entry["path"]: entry["sha"] for entry in tree.get("tree", [])
+                if entry.get("type") == "blob"}
+    changed = {path: data for path, data in files.items() if existing.get(path) != _blob_sha(data)}
+    if not changed:
+        return ""
+    head = _git_api(f"/git/ref/heads/{quoted}")["object"]["sha"]
+    base_tree = _git_api(f"/git/commits/{head}")["tree"]["sha"]
+    entries = []
+    for path, data in sorted(changed.items()):
+        blob = _git_api("/git/blobs", "POST",
+                        {"content": base64.b64encode(data).decode(), "encoding": "base64"})
+        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+    new_tree = _git_api("/git/trees", "POST", {"base_tree": base_tree, "tree": entries})
+    commit = _git_api("/git/commits", "POST",
+                      {"message": message, "tree": new_tree["sha"], "parents": [head]})
+    _git_api(f"/git/refs/heads/{quoted}", "PATCH", {"sha": commit["sha"]})
+    return commit["sha"]
 
 
 def campaign_marker(week: Week, zoho: str = "PENDING") -> str:
@@ -492,6 +591,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "no_products", "week": week.label, "product_count": 0,
                 "writes": False, "feishu_message_id": message_id}
 
+    products, image_files, image_warnings = prepare_images(week, products)
     rendered = render_email(week, products)
     content_version = rendered_content_version(rendered)
     if args.dry_run:
@@ -500,7 +600,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
         return {"status": "dry_run", "week": week.label, "product_count": len(products),
-                "artifact": str(output)}
+                "artifact": str(output), "image_warnings": image_warnings}
 
     require_config()
     readme, _ = github_file("README.md")
@@ -534,6 +634,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
                     "zoho_campaign_status": campaign_status, "feishu_message_id": message_id}
 
         updated_index = update_index(index, week, products)
+        put_github_files(image_files, f"Add {week.label} email images")
         put_github_file(path, rendered, f"Refresh {week.label} weekly new-arrivals email")
         if updated_index != index:
             put_github_file("index.html", updated_index, f"Refresh {week.label} weekly email index")
@@ -554,19 +655,22 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
             delete_zoho_draft(prior_key)
         except WorkflowError as exc:
             cleanup_warning = f"；旧草稿未能自动清理：{exc}"
+        image_note = f"\n统一裁切配图：{len(image_files)} 张" + (
+            f"；{len(image_warnings)} 张沿用原图" if image_warnings else "")
         message_id = send_feishu(
             f"Hongxiu 每周新品邮件已刷新：{week.label}\n"
             f"统计窗口：{week.start:%Y-%m-%d %H:%M} 至 {week.end:%Y-%m-%d %H:%M}（Asia/Shanghai）\n"
-            f"符合条件商品：{len(products)} 件\n预览：{content_url}\n"
+            f"符合条件商品：{len(products)} 件{image_note}\n预览：{content_url}\n"
             f"新 Zoho Campaigns 草稿：{replacement_key}{cleanup_warning}\n邮件尚未发送。")
         return {"status": "refreshed", "week": week.label, "window_start": iso(week.start),
                 "window_end": iso(week.end), "product_count": len(products),
                 "content_url": content_url, "zoho_campaign_key": replacement_key,
                 "old_zoho_campaign_key": prior_key, "cleanup_warning": cleanup_warning,
-                "feishu_message_id": message_id}
+                "feishu_message_id": message_id, "image_warnings": image_warnings}
 
     updated_index = update_index(index, week, products)
     updated_readme = update_readme(readme, week, "PENDING")
+    put_github_files(image_files, f"Add {week.label} email images")
     put_github_file(path, rendered, f"Add {week.label} weekly new-arrivals email")
     if updated_index != index:
         put_github_file("index.html", updated_index, f"Index {week.label} weekly email")
@@ -580,15 +684,17 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         raise WorkflowError("Could not reload README.md after Zoho draft creation")
     final_readme = update_readme(latest_readme, week, zoho_key)
     put_github_file("README.md", final_readme, f"Record Zoho draft for {week.label}")
+    image_note = f"\n统一裁切配图：{len(image_files)} 张" + (
+        f"；{len(image_warnings)} 张沿用原图" if image_warnings else "")
     message = (f"Hongxiu 每周新品邮件已完成：{week.label}\n"
                f"统计窗口：{week.start:%Y-%m-%d %H:%M} 至 {week.end:%Y-%m-%d %H:%M}（Asia/Shanghai）\n"
-               f"符合条件商品：{len(products)} 件\n预览：{content_url}\n"
+               f"符合条件商品：{len(products)} 件{image_note}\n预览：{content_url}\n"
                f"Zoho Campaigns 草稿：{zoho_key}\n邮件尚未发送。")
     message_id = send_feishu(message)
     return {"status": "completed", "week": week.label, "window_start": iso(week.start),
             "window_end": iso(week.end), "product_count": len(products),
             "content_url": content_url, "zoho_campaign_key": zoho_key,
-            "feishu_message_id": message_id}
+            "feishu_message_id": message_id, "image_warnings": image_warnings}
 
 
 def build_parser() -> argparse.ArgumentParser:

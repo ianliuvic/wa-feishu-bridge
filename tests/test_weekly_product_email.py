@@ -123,6 +123,53 @@ class WeeklyProductEmailTests(unittest.TestCase):
             with self.assertRaises(weekly.WorkflowError):
                 weekly.discover_products(period, 30)
 
+    def test_normalize_product_image_crops_every_ratio_to_one_frame(self):
+        from PIL import Image
+        from io import BytesIO
+
+        for size in ((1000, 1000), (600, 900), (900, 600)):
+            buffer = BytesIO()
+            Image.new("RGB", size, "white").save(buffer, format="PNG")
+            data = weekly.normalize_product_image(buffer.getvalue())
+            image = Image.open(BytesIO(data))
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.size, weekly.EMAIL_IMAGE_SIZE)
+
+    def test_image_key_stays_unique_for_reused_style_numbers(self):
+        first = {"style_no": "SWOP712", "product_detail_id": "2680"}
+        second = {"style_no": "SWOP712", "product_detail_id": "2681"}
+        self.assertNotEqual(weekly.image_key(first), weekly.image_key(second))
+        self.assertEqual(weekly.image_key(first), "SWOP712-2680")
+
+    def test_prepare_images_rewrites_urls_and_keeps_broken_images(self):
+        from PIL import Image
+        from io import BytesIO
+
+        buffer = BytesIO()
+        Image.new("RGB", (1200, 1200), "white").save(buffer, format="PNG")
+        good = {"style_no": "A1", "product_detail_id": "1",
+                "image_url": "https://example.test/a.png"}
+        bad = {"style_no": "B2", "product_detail_id": "2",
+               "image_url": "https://example.test/b.png"}
+        period = weekly.resolve_week("2026-08-30")
+
+        def fake_request(method, url, **kwargs):
+            if url.endswith("b.png"):
+                raise weekly.WorkflowError("boom")
+            return 200, buffer.getvalue(), {}
+
+        with patch.object(weekly, "request", side_effect=fake_request), patch.object(
+            weekly, "env", side_effect=lambda name, default="": (
+                "https://email.test" if name == "EMAIL_CAMPAIGN_BASE_URL" else default)
+        ):
+            prepared, files, warnings = weekly.prepare_images(period, [good, bad])
+
+        self.assertEqual(prepared[0]["image_url"],
+                         "https://email.test/campaigns/2026-W36-new-arrivals/images/A1-1.jpg")
+        self.assertEqual(prepared[1]["image_url"], "https://example.test/b.png")
+        self.assertEqual(list(files), ["campaigns/2026-W36-new-arrivals/images/A1-1.jpg"])
+        self.assertEqual(len(warnings), 1)
+
     def test_missing_zoho_campaign_is_recoverable(self):
         with patch.object(
             weekly,
