@@ -24,6 +24,9 @@ logger = logging.getLogger("bridge.inquiry")
 
 BEIJING = timezone(timedelta(hours=8))
 MAX_TEXT = 4000
+MAX_ATTEMPTS = max(1, int(os.getenv("INQUIRY_MAX_ATTEMPTS", "3")))
+WINDOW_HOURS = max(1, int(os.getenv("INQUIRY_WINDOW_HOURS", "48")))
+REOPEN_DAYS = max(1, int(os.getenv("INQUIRY_REOPEN_DAYS", "30")))
 
 _SYSTEM = """你是红绣泳装（中国泳装/瑜伽服工厂）的询盘审核员。
 任务：判断一条 WhatsApp 消息是否是【真实的泳装采购询盘】——对方是买家，想向我们采购或委托生产泳装类产品。
@@ -51,6 +54,13 @@ def _now():
     return datetime.now(BEIJING)
 
 
+def _parse_ts(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=BEIJING)
+    except Exception:
+        return None
+
+
 class InquiryNotifier:
     def __init__(
         self,
@@ -64,36 +74,67 @@ class InquiryNotifier:
         self.min_confidence = min_confidence
         self._lock = threading.Lock()
         self._seed_lock = threading.Lock()
+        self._conn_lock = threading.Lock()
         self._conn = None
+        self._jid_locks: dict[str, threading.Lock] = {}
+        self._jid_locks_guard = threading.Lock()
+
+    def _jid_lock(self, jid: str) -> threading.Lock:
+        """Serialize the whole screen-LLM-send path per conversation."""
+        with self._jid_locks_guard:
+            lock = self._jid_locks.get(jid)
+            if lock is None:
+                lock = threading.Lock()
+                self._jid_locks[jid] = lock
+            return lock
 
     # ---------- storage ----------
 
     def _db(self):
         if self._conn is not None:
             return self._conn
-        directory = os.path.dirname(self.db_path) or "."
-        try:
-            os.makedirs(directory, exist_ok=True)
-        except Exception:
-            pass
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS seen (
-                jid TEXT PRIMARY KEY,
-                first_seen TEXT NOT NULL,
-                push_name TEXT,
-                seeded INTEGER NOT NULL DEFAULT 0,
-                verdict INTEGER,
-                reason TEXT
+        with self._conn_lock:
+            if self._conn is not None:
+                return self._conn
+            directory = os.path.dirname(self.db_path) or "."
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except Exception:
+                pass
+            conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen (
+                    jid TEXT PRIMARY KEY,
+                    first_seen TEXT NOT NULL,
+                    push_name TEXT,
+                    seeded INTEGER NOT NULL DEFAULT 0,
+                    verdict INTEGER,
+                    reason TEXT,
+                    status TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_message_at TEXT
+                )
+                """
             )
-            """
-        )
-        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-        conn.commit()
-        self._conn = conn
-        return conn
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(seen)")}
+            if "status" not in columns:
+                conn.execute("ALTER TABLE seen ADD COLUMN status TEXT")
+            if "attempts" not in columns:
+                conn.execute("ALTER TABLE seen ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            if "last_message_at" not in columns:
+                conn.execute("ALTER TABLE seen ADD COLUMN last_message_at TEXT")
+            conn.execute("UPDATE seen SET status = 'known' WHERE seeded = 1 AND status IS NULL")
+            conn.execute(
+                "UPDATE seen SET status = CASE WHEN verdict = 1 THEN 'sent' "
+                "WHEN verdict = 0 THEN 'rejected' ELSE 'pending' END WHERE status IS NULL"
+            )
+            conn.execute("UPDATE seen SET last_message_at = first_seen WHERE last_message_at IS NULL")
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.commit()
+            self._conn = conn
+            return conn
 
     def _seeded(self, instance: str) -> bool:
         row = self._db().execute(
@@ -109,48 +150,93 @@ class InquiryNotifier:
             )
             self._db().commit()
 
-    def known(self, jid: str) -> bool:
-        try:
-            row = self._db().execute("SELECT 1 FROM seen WHERE jid = ?", (jid,)).fetchone()
-            return row is not None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("inquiry db read failed: %s", exc)
-            return False
+    def _row(self, jid: str):
+        row = self._db().execute(
+            "SELECT status, attempts, first_seen, last_message_at, seeded, push_name "
+            "FROM seen WHERE jid = ?",
+            (jid,),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = ("status", "attempts", "first_seen", "last_message_at", "seeded", "push_name")
+        return dict(zip(keys, row))
 
-    def claim(self, jid: str, push_name: str) -> bool:
-        """Reserve a sender before screening. False means it was already seen."""
-        try:
-            with self._lock:
-                cur = self._db().execute(
-                    "INSERT OR IGNORE INTO seen (jid, first_seen, push_name, seeded, verdict) "
-                    "VALUES (?, ?, ?, 0, NULL)",
-                    (jid, _now().strftime("%Y-%m-%d %H:%M:%S"), push_name or ""),
+    def start_screening(self, jid: str, push_name: str) -> str:
+        """Decide whether this message should go to the model.
+
+        Returns "judge", "known" (seeded contact), or "done" (already sent or
+        rejected until the reopen window). A pending sender is never locked by a
+        greeting: only a delivered card or the attempt/TTL cap ends screening.
+        """
+        now = _now()
+        stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            conn = self._db()
+            row = self._row(jid)
+            if row is None:
+                conn.execute(
+                    "INSERT INTO seen (jid, first_seen, push_name, seeded, verdict, reason, "
+                    "status, attempts, last_message_at) VALUES (?, ?, ?, 0, NULL, '', 'pending', 0, ?)",
+                    (jid, stamp, push_name or "", stamp),
                 )
-                self._db().commit()
-                return cur.rowcount == 1
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("inquiry db claim failed: %s", exc)
-            return False
-
-    def settle(self, jid: str, verdict: bool, reason: str) -> None:
-        try:
-            with self._lock:
-                self._db().execute(
-                    "UPDATE seen SET verdict = ?, reason = ? WHERE jid = ?",
-                    (1 if verdict else 0, (reason or "")[:200], jid),
+                conn.commit()
+                return "judge"
+            if row["seeded"]:
+                return "known"
+            status = row["status"] or "pending"
+            if status == "sent":
+                return "done"
+            if status == "rejected":
+                last = _parse_ts(row["last_message_at"]) or now
+                if (now - last).total_seconds() < REOPEN_DAYS * 86400:
+                    return "done"
+                conn.execute(
+                    "UPDATE seen SET status = 'pending', attempts = 0, first_seen = ?, "
+                    "last_message_at = ?, push_name = ?, verdict = NULL WHERE jid = ?",
+                    (stamp, stamp, push_name or row["push_name"] or "", jid),
                 )
-                self._db().commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("inquiry db settle failed: %s", exc)
+                conn.commit()
+                return "judge"
+            # pending: start a fresh window when the old one expired
+            first = _parse_ts(row["first_seen"]) or now
+            if (now - first).total_seconds() > WINDOW_HOURS * 3600:
+                conn.execute(
+                    "UPDATE seen SET attempts = 0, first_seen = ? WHERE jid = ?",
+                    (stamp, jid),
+                )
+            conn.execute(
+                "UPDATE seen SET last_message_at = ?, push_name = ? WHERE jid = ?",
+                (stamp, push_name or row["push_name"] or "", jid),
+            )
+            conn.commit()
+            return "judge"
 
-    def release(self, jid: str) -> None:
-        """Drop a reservation when screening failed, so a later message can retry."""
-        try:
-            with self._lock:
-                self._db().execute("DELETE FROM seen WHERE jid = ?", (jid,))
-                self._db().commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("inquiry db release failed: %s", exc)
+    def record_rejected(self, jid: str, reason: str) -> None:
+        """A judged message that was not an inquiry: count it, cap the window."""
+        now = _now()
+        with self._lock:
+            conn = self._db()
+            row = self._row(jid)
+            if row is None:
+                return
+            attempts = int(row["attempts"] or 0) + 1
+            first = _parse_ts(row["first_seen"]) or now
+            expired = (now - first).total_seconds() > WINDOW_HOURS * 3600
+            status = "rejected" if attempts >= MAX_ATTEMPTS or expired else "pending"
+            conn.execute(
+                "UPDATE seen SET attempts = ?, status = ?, verdict = 0, reason = ? WHERE jid = ?",
+                (attempts, status, (reason or "")[:200], jid),
+            )
+            conn.commit()
+
+    def record_sent(self, jid: str, reason: str) -> None:
+        with self._lock:
+            conn = self._db()
+            conn.execute(
+                "UPDATE seen SET status = 'sent', verdict = 1, reason = ? WHERE jid = ?",
+                ((reason or "")[:200], jid),
+            )
+            conn.commit()
 
     def seed(self, instance: str, evolution) -> bool:
         """Mark every existing Evolution chat as known, once per instance.
@@ -177,14 +263,17 @@ class InquiryNotifier:
                     continue
                 if jid.endswith("@g.us") or jid.endswith("@broadcast"):
                     continue
-                rows.append((jid, stamp, str(chat.get("pushName") or ""), 1, None))
-            try:
-                self._db().executemany(
-                    "INSERT OR IGNORE INTO seen (jid, first_seen, push_name, seeded, verdict) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    rows,
+                rows.append(
+                    (jid, stamp, str(chat.get("pushName") or ""), 1, None, "known", 0, stamp)
                 )
-                self._db().commit()
+            try:
+                with self._lock:
+                    self._db().executemany(
+                        "INSERT OR IGNORE INTO seen (jid, first_seen, push_name, seeded, verdict, "
+                        "status, attempts, last_message_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        rows,
+                    )
+                    self._db().commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("inquiry seed write failed: %s", exc)
                 return False
@@ -194,13 +283,19 @@ class InquiryNotifier:
 
     def counts(self) -> dict:
         try:
-            total = self._db().execute("SELECT COUNT(*) FROM seen").fetchone()[0]
-            inquiries = self._db().execute(
-                "SELECT COUNT(*) FROM seen WHERE verdict = 1"
-            ).fetchone()[0]
-            return {"known": total, "inquiries": inquiries}
+            with self._lock:
+                rows = dict(
+                    self._db().execute("SELECT status, COUNT(*) FROM seen GROUP BY status").fetchall()
+                )
+            return {
+                "tracked": sum(rows.values()),
+                "known": rows.get("known", 0),
+                "pending": rows.get("pending", 0),
+                "inquiries": rows.get("sent", 0),
+                "rejected": rows.get("rejected", 0),
+            }
         except Exception:
-            return {"known": 0, "inquiries": 0}
+            return {"tracked": 0, "known": 0, "pending": 0, "inquiries": 0, "rejected": 0}
 
     def close(self) -> None:
         with self._lock:
@@ -227,32 +322,35 @@ class InquiryNotifier:
             return False
 
         jid = evt.remote_jid
-        if not self.claim(jid, evt.push_name):
-            return False
+        with self._jid_lock(jid):
+            action = self.start_screening(jid, evt.push_name)
+            if action != "judge":
+                return False
 
-        result, err = self.judge(llm, text, evt.push_name, evt.sender_phone)
-        if err or result is None:
-            logger.warning("inquiry: screening failed for %s: %s", jid, err)
-            self.release(jid)
-            return False
+            result, err = self.judge(llm, text, evt.push_name, evt.sender_phone)
+            if err or result is None:
+                # Leave the sender pending: the next message gets another try.
+                logger.warning("inquiry: screening failed for %s: %s", jid, err)
+                return False
 
-        is_inquiry = bool(result["is_inquiry"]) and result["confidence"] >= self.min_confidence
-        self.settle(jid, is_inquiry, result["reason"])
-        if not is_inquiry:
+            is_inquiry = bool(result["is_inquiry"]) and result["confidence"] >= self.min_confidence
+            if not is_inquiry:
+                self.record_rejected(jid, result["reason"])
+                logger.info(
+                    "inquiry: not a lead %s confidence=%.2f reason=%s (kept for next message)",
+                    evt.sender_phone, result["confidence"], result["reason"],
+                )
+                return False
+
+            card = self.build_card(evt, result["summary"], text, result["translation"])
+            flat = self.build_card(evt, result["summary"], text, result["translation"], compact=True)
+            if not self.post(card, flat):
+                return False
+            self.record_sent(jid, result["reason"])
             logger.info(
-                "inquiry: not a lead %s confidence=%.2f reason=%s",
-                evt.sender_phone, result["confidence"], result["reason"],
+                "inquiry: forwarded %s confidence=%.2f", evt.sender_phone, result["confidence"]
             )
-            return False
-
-        card = self.build_card(evt, result["summary"], text, result["translation"])
-        flat = self.build_card(evt, result["summary"], text, result["translation"], compact=True)
-        if not self.post(card, flat):
-            return False
-        logger.info(
-            "inquiry: forwarded %s confidence=%.2f", evt.sender_phone, result["confidence"]
-        )
-        return True
+            return True
 
     def judge(self, llm, text, push_name, phone):
         if llm is None:

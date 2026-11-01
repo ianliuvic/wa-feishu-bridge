@@ -64,20 +64,28 @@ Mount `/data` as persistent storage. The scheduler API is available under
 | `INQUIRY_WEBHOOK_URL` | no | Feishu group custom-bot webhook for new-inquiry cards; blank disables |
 | `INQUIRY_DB_PATH` | no | First-contact store, default `/data/wa_inquiry.db` |
 | `INQUIRY_MIN_CONFIDENCE` | no | Minimum confidence for a lead, default `0.65` |
+| `INQUIRY_MAX_ATTEMPTS` | no | Judged messages per sender before giving up, default `3` |
+| `INQUIRY_WINDOW_HOURS` | no | Screening window per sender, default `48` |
+| `INQUIRY_REOPEN_DAYS` | no | Re-open a rejected sender after N days, default `30` |
 
 ## New-inquiry group (read-only card, discussion allowed)
 
-The first text message from a number that has never appeared in Evolution is
-screened by DeepSeek. A confident, concrete swimwear buyer inquiry is posted to
-`INQUIRY_WEBHOOK_URL` as a read-only card (summary, source, time, customer,
+A number that has never appeared in Evolution is screened by DeepSeek from its
+first text message onward. A confident, concrete swimwear buyer inquiry is posted
+to `INQUIRY_WEBHOOK_URL` as a read-only card (summary, source, time, customer,
 original text, Chinese translation). Everything else stays in the normal
 forwarding flow.
 
 - Existing chats are seeded once from `/chat/findChats`, so old customers who
   were never saved to the phone book are not treated as new leads.
-- Voice / image / file / video as the first message is skipped, and does not
-  consume the sender: the next text message is still screened.
-- A sender is screened once; later messages never re-enter the group.
+- Voice / image / file / video is skipped, and does not consume the sender: the
+  next text message is still screened.
+- A greeting such as "Hi" does **not** lock the sender. Non-inquiries stay
+  pending and the next message is judged, so "Hi" followed by a real inquiry is
+  still caught.
+- Screening stops when a card is delivered, after `INQUIRY_MAX_ATTEMPTS` judged
+  messages, or when the `INQUIRY_WINDOW_HOURS` window expires; a sender rejected
+  that way is re-opened after `INQUIRY_REOPEN_DAYS`.
 - The group card has no buttons or callbacks by design; members can still quote
   the card and discuss the inquiry in the group as usual.
 
