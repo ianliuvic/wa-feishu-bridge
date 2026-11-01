@@ -308,7 +308,7 @@ class InquiryNotifier:
             },
             "border": {"color": "grey", "corner_radius": "5px"},
             "padding": "8px 8px 8px 8px",
-            "elements": [{"tag": "plain_text", "content": text or "（空）"}],
+            "elements": [{"tag": "markdown", "content": (text or "（空）").replace("<", "＜").replace(">", "＞")}],
         }
 
     def build_card(self, evt: EvolutionMessage, summary, original, translation):

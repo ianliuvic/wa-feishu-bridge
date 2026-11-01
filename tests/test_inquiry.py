@@ -120,6 +120,9 @@ class InquiryNotifierTests(unittest.TestCase):
         self.assertNotIn('"action"', serialized)
         self.assertNotIn('"button"', serialized)
         self.assertEqual(card["header"]["template"], "green")
+        panels = [e for e in card["body"]["elements"] if e["tag"] == "collapsible_panel"]
+        self.assertTrue(panels)
+        self.assertTrue(all(p["elements"][0]["tag"] == "markdown" for p in panels))
 
 
 if __name__ == "__main__":
