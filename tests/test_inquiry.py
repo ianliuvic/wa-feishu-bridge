@@ -122,7 +122,8 @@ class InquiryNotifierTests(unittest.TestCase):
         self.assertEqual(card["header"]["template"], "green")
         panels = [e for e in card["body"]["elements"] if e["tag"] == "collapsible_panel"]
         self.assertTrue(panels)
-        self.assertTrue(all(p["elements"][0]["tag"] == "markdown" for p in panels))
+        self.assertTrue(all(p["elements"][0]["tag"] == "div" for p in panels))
+        self.assertFalse(card["config"]["wide_screen_mode"])
 
 
 if __name__ == "__main__":

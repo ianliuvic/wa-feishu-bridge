@@ -246,7 +246,8 @@ class InquiryNotifier:
             return False
 
         card = self.build_card(evt, result["summary"], text, result["translation"])
-        if not self.post(card):
+        flat = self.build_card(evt, result["summary"], text, result["translation"], compact=True)
+        if not self.post(card, flat):
             return False
         logger.info(
             "inquiry: forwarded %s confidence=%.2f", evt.sender_phone, result["confidence"]
@@ -291,6 +292,10 @@ class InquiryNotifier:
         return value.replace("<", "＜").replace(">", "＞")[:limit]
 
     @staticmethod
+    def _plain(text):
+        return (text or "").replace("<", "＜").replace(">", "＞")
+
+    @staticmethod
     def _panel(title, text):
         return {
             "tag": "collapsible_panel",
@@ -308,30 +313,43 @@ class InquiryNotifier:
             },
             "border": {"color": "grey", "corner_radius": "5px"},
             "padding": "8px 8px 8px 8px",
-            "elements": [{"tag": "markdown", "content": (text or "（空）").replace("<", "＜").replace(">", "＞")}],
+            "elements": [
+                {"tag": "div", "text": {"tag": "plain_text", "content": InquiryNotifier._plain(text) or "（空）"}}
+            ],
         }
 
-    def build_card(self, evt: EvolutionMessage, summary, original, translation):
+    def _meta(self, evt: EvolutionMessage):
         private = evt.remote_jid.endswith("@lid")
         identity = "身份" if private else "号码"
         phone = evt.sender_phone + ("（WhatsApp 隐私号）" if private else "")
+        return (
+            f"**来源**　WhatsApp · {self._md(evt.instance, 60)}\n"
+            f"**时间**　{_now().strftime('%Y-%m-%d %H:%M')}\n"
+            f"**客户**　{self._md(evt.push_name or '未命名', 60)}\n"
+            f"**{identity}**　{self._md(phone, 60)}"
+        )
+
+    def build_card(self, evt: EvolutionMessage, summary, original, translation, compact=False):
         inquiry_id = "INQ-WA-" + _now().strftime("%Y%m%d-%H%M%S")
         elements = [
             {"tag": "markdown", "content": f"**{self._md(summary, 80) or '（无摘要）'}**"},
-            {
-                "tag": "markdown",
-                "content": (
-                    f"**来源**　WhatsApp · {self._md(evt.instance, 60)}\n"
-                    f"**时间**　{_now().strftime('%Y-%m-%d %H:%M')}\n"
-                    f"**客户**　{self._md(evt.push_name or '未命名', 60)}\n"
-                    f"**{identity}**　{self._md(phone, 60)}"
-                ),
-            },
+            {"tag": "markdown", "content": self._meta(evt)},
             {"tag": "hr"},
-            self._panel("📄 原文", (original or "")[:MAX_TEXT]),
         ]
-        if translation and translation.strip() != (original or "").strip():
-            elements.append(self._panel("🌐 译文", translation[:MAX_TEXT]))
+        if compact:
+            elements += [
+                {"tag": "markdown", "content": "**📄 原文**"},
+                {"tag": "div", "text": {"tag": "plain_text", "content": self._plain(original)[:MAX_TEXT] or "（空）"}},
+            ]
+            if translation and translation.strip() != (original or "").strip():
+                elements += [
+                    {"tag": "markdown", "content": "**🌐 译文**"},
+                    {"tag": "div", "text": {"tag": "plain_text", "content": self._plain(translation)[:MAX_TEXT]}},
+                ]
+        else:
+            elements.append(self._panel("📄 原文", (original or "")[:MAX_TEXT]))
+            if translation and translation.strip() != (original or "").strip():
+                elements.append(self._panel("🌐 译文", translation[:MAX_TEXT]))
         elements += [
             {"tag": "hr"},
             {
@@ -341,7 +359,7 @@ class InquiryNotifier:
         ]
         return {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True, "update_multi": True},
+            "config": {"wide_screen_mode": False, "update_multi": True},
             "header": {
                 "template": "green",
                 "title": {"tag": "plain_text", "content": "🆕 新询盘 · WhatsApp"},
@@ -349,7 +367,7 @@ class InquiryNotifier:
             "body": {"direction": "vertical", "elements": elements},
         }
 
-    def post(self, card) -> bool:
+    def post(self, card, fallback=None) -> bool:
         try:
             resp = httpx.post(
                 self.webhook_url,
@@ -362,5 +380,8 @@ class InquiryNotifier:
             return False
         if data.get("code") not in (0, None):
             logger.warning("inquiry webhook rejected: %s %s", data.get("code"), data.get("msg"))
+            if fallback is not None:
+                logger.warning("inquiry: retrying with the flat card layout")
+                return self.post(fallback)
             return False
         return True
