@@ -57,6 +57,9 @@ from .config import (
     FEISHU_REPLY_CONFIRM,
     MARKETING_CHAT_ENABLED,
     MARKETING_CHAT_ID,
+    INQUIRY_WEBHOOK_URL,
+    INQUIRY_DB_PATH,
+    INQUIRY_MIN_CONFIDENCE,
     SCHEDULER_API_TOKEN,
     SCHEDULER_DB_PATH,
     SCHEDULER_DEFAULT_TIMEZONE,
@@ -65,6 +68,7 @@ from .config import (
 from .autoreply import AutoReplyManager
 from .evolution import EvolutionClient, EvolutionMessage
 from .feishu import FeishuClient
+from .inquiry import InquiryNotifier
 from .llm import DeepSeekClient
 from .replymap import ReplyMap
 from .scheduler import SchedulerStore, select_delivery_artifacts
@@ -96,6 +100,11 @@ attachment_store = PendingAttachmentStore(
     ttl_seconds=ATTACHMENT_TTL_SECONDS,
     max_files_per_user=ATTACHMENT_MAX_FILES,
     max_bytes=ATTACHMENT_MAX_BYTES,
+)
+inquiry_notifier = InquiryNotifier(
+    INQUIRY_WEBHOOK_URL,
+    INQUIRY_DB_PATH,
+    min_confidence=INQUIRY_MIN_CONFIDENCE,
 )
 
 _llm: DeepSeekClient | None = None
@@ -664,6 +673,24 @@ async def scheduler_loop() -> None:
 async def start_scheduler() -> None:
     global _scheduler_loop_task
     _scheduler_loop_task = asyncio.create_task(scheduler_loop())
+    if inquiry_notifier.webhook_url:
+        _spawn(asyncio.to_thread(seed_inquiry_history))
+
+
+def seed_inquiry_history() -> None:
+    """Seed known chats before webhook traffic can be misread as new leads."""
+    evolution = get_evolution()
+    if evolution is None:
+        return
+    try:
+        instances = evolution.fetch_instances()
+    except Exception:  # noqa: BLE001
+        logger.exception("inquiry seed: cannot list Evolution instances")
+        return
+    for item in instances or []:
+        name = str(item.get("name") or "")
+        if name and item.get("connectionStatus") == "open":
+            inquiry_notifier.seed(name, evolution)
 
 
 @app.on_event("shutdown")
@@ -811,6 +838,10 @@ async def health():
         },
         "scheduler": scheduler_store.health(),
         "attachments": attachment_store.health(),
+        "inquiry": {
+            "configured": bool(inquiry_notifier.webhook_url),
+            **inquiry_notifier.counts(),
+        },
     }
 
 
@@ -1216,6 +1247,12 @@ async def evolution_webhook(request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.exception("feishu forward failed")
         return {"status": "error", "reason": str(exc)}
+
+    # New-inquiry screening runs in the background: the classifier must never
+    # delay the webhook ack. Only the first text message from an unknown number
+    # is screened; media/voice/file first messages are skipped by design.
+    if inquiry_notifier.webhook_url and not evt.is_group and evt.media_type == "none":
+        _spawn(asyncio.to_thread(inquiry_notifier.screen, evt, get_llm(), get_evolution()))
 
     # Off-hours auto-reply (once per customer per window). Independent of the
     # Feishu forwarding above; failures are logged, never block the webhook.

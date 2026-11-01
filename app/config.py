@@ -107,3 +107,9 @@ SCHEDULER_DB_PATH = os.getenv("SCHEDULER_DB_PATH", "/data/marketing-scheduler.db
 SCHEDULER_API_TOKEN = os.getenv("SCHEDULER_API_TOKEN", "")
 SCHEDULER_DEFAULT_TIMEZONE = os.getenv("SCHEDULER_DEFAULT_TIMEZONE", "Asia/Shanghai")
 SCHEDULER_POLL_SECONDS = max(5, int(os.getenv("SCHEDULER_POLL_SECONDS", "15")))
+
+# New-inquiry group (Feishu group custom-bot webhook, works in external groups).
+# Blank disables the feature; the WhatsApp group forwarding is unaffected.
+INQUIRY_WEBHOOK_URL = os.getenv("INQUIRY_WEBHOOK_URL", "").strip()
+INQUIRY_DB_PATH = os.getenv("INQUIRY_DB_PATH", "/data/wa_inquiry.db")
+INQUIRY_MIN_CONFIDENCE = float(os.getenv("INQUIRY_MIN_CONFIDENCE", "0.65"))

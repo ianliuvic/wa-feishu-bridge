@@ -21,6 +21,7 @@ os.environ.update({
     "MARKETING_CHAT_ID": "oc_marketing",
     "SCHEDULER_DB_PATH": os.path.join(_TMP, "scheduler.db"),
     "ATTACHMENT_DIR": os.path.join(_TMP, "attachments"),
+    "INQUIRY_DB_PATH": os.path.join(_TMP, "inquiry.db"),
     "CODEX_WORKER_URL": "https://codex.invalid",
     "CODEX_WORKER_TOKEN": "test-codex-token",
     "DSH_WORKER_URL": "https://dsh.invalid",

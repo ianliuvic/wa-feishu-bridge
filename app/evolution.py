@@ -107,6 +107,19 @@ class EvolutionClient:
         logger.info("sent WhatsApp reply to %s via instance %s", number, instance)
         return data
 
+    def find_chats(self, instance: str) -> list[dict]:
+        """List the instance's chats, used once to seed the "known sender" table."""
+        data = self._post(f"/chat/findChats/{quote(instance, safe='')}", {})
+        return data if isinstance(data, list) else []
+
+    def fetch_instances(self) -> list[dict]:
+        """List Evolution instances (used to find the open instance at startup)."""
+        url = f"{self.base_url}/instance/fetchInstances"
+        resp = httpx.get(url, headers={"apikey": self.api_key}, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
     def send_media(
         self,
         instance: str,

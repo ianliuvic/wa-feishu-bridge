@@ -28,6 +28,7 @@ class DeepSeekClient:
         system: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        json_mode: bool = False,
     ) -> str:
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -41,6 +42,8 @@ class DeepSeekClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
         resp = httpx.post(url, json=body, headers=headers, timeout=60)
         try:
             data = resp.json()
