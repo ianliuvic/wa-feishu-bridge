@@ -181,11 +181,13 @@ def discover_products(week: Week, limit: int) -> list[dict[str, Any]]:
     except json.JSONDecodeError as exc:
         raise WorkflowError(f"Collector returned invalid JSON: {exc}") from None
     products = payload.get("products", []) if isinstance(payload, dict) else []
-    required = {"title", "image_url", "wp_url", "listing_time"}
+    # listing_time is the 1688 listing date: only products that still have a shop
+    # listing row carry it, and it is not what the weekly window filters on.
+    required = {"title", "image_url", "wp_url"}
     clean = [product for product in products if required.issubset(product) and
              all(product.get(key) for key in required)]
     if len(clean) != len(products):
-        raise WorkflowError("Collector returned a product missing a public title, image, URL, or listing time")
+        raise WorkflowError("Collector returned a product missing a public title, image, or URL")
     return clean
 
 

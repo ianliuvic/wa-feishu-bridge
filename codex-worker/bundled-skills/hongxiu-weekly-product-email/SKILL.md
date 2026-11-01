@@ -14,7 +14,7 @@ Build one refreshable, idempotent weekly B2B product-roundup draft from collecto
 3. Use `run` only when the user has authorized creating the hosted page, Zoho draft, and Feishu notification.
 4. Report the selected week, eligible product count, hosted URL, Zoho draft key, and Feishu result.
 
-The default reporting window is the complete seven-day interval from the previous Sunday at 09:00 through the current Sunday at 09:00 in `Asia/Shanghai`. The script treats a product as eligible only when the collector confirms all of these: its official 1688 listing timestamp is inside that half-open interval, the source listing remains active and ingestion-eligible, and its wearhongxiu WordPress publication is public. Never substitute capture time or first-seen time for the official listing timestamp.
+The default reporting window is the complete seven-day interval from the previous Sunday at 09:00 through the current Sunday at 09:00 in `Asia/Shanghai`. The script treats a product as eligible only when the collector confirms all of these: the wearhongxiu WordPress publication is public (`wp_status = publish`) and its actual first publish time (`product_wordpress_publications.first_published_at`) is inside that half-open interval. A 1688 shop listing row is not required; products captured outside a shop scan (manual or LinkFox-only) are included once they are published. Never substitute 1688 `listing_time`, capture time, or first-seen time for the WordPress first-publish time. At most `--limit` (30) products are returned, newest first by `first_published_at`.
 
 ## Safety and idempotency
 

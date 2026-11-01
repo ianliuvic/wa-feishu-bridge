@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import subprocess
 import sys
 import unittest
 from datetime import datetime
@@ -86,6 +88,40 @@ class WeeklyProductEmailTests(unittest.TestCase):
             weekly.versioned_content_url("https://example.test/email/", version),
             f"https://example.test/email/?v={version}",
         )
+
+    def test_discover_products_accepts_products_without_shop_listing_time(self):
+        period = weekly.resolve_week("2026-08-30")
+        payload = {"products": [
+            {"title": "A", "image_url": "https://example.test/a.jpg",
+             "wp_url": "https://example.test/a"},
+            {"title": "B", "image_url": "https://example.test/b.jpg",
+             "wp_url": "https://example.test/b", "listing_time": "2026-09-01T00:00:00Z"},
+        ]}
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+        env = {"COLLECTOR_API_KEY": "test-key", "COLLECTOR_API_URL": "https://collector.test"}
+        with patch.object(weekly, "require_config"), patch.object(
+            weekly, "env", side_effect=lambda name, default="": env.get(name, default)
+        ), patch.object(weekly.subprocess, "run", return_value=completed):
+            products = weekly.discover_products(period, 30)
+        self.assertEqual(
+            [product["wp_url"] for product in products],
+            ["https://example.test/a", "https://example.test/b"],
+        )
+
+    def test_discover_products_rejects_missing_public_url(self):
+        period = weekly.resolve_week("2026-08-30")
+        payload = {"products": [{"title": "A", "image_url": "https://example.test/a.jpg"}]}
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+        env = {"COLLECTOR_API_KEY": "test-key", "COLLECTOR_API_URL": "https://collector.test"}
+        with patch.object(weekly, "require_config"), patch.object(
+            weekly, "env", side_effect=lambda name, default="": env.get(name, default)
+        ), patch.object(weekly.subprocess, "run", return_value=completed):
+            with self.assertRaises(weekly.WorkflowError):
+                weekly.discover_products(period, 30)
 
     def test_missing_zoho_campaign_is_recoverable(self):
         with patch.object(
