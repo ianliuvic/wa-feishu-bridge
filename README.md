@@ -64,9 +64,10 @@ Mount `/data` as persistent storage. The scheduler API is available under
 | `INQUIRY_WEBHOOK_URL` | no | Feishu group custom-bot webhook for new-inquiry cards; blank disables |
 | `INQUIRY_DB_PATH` | no | First-contact store, default `/data/wa_inquiry.db` |
 | `INQUIRY_MIN_CONFIDENCE` | no | Minimum confidence for a lead, default `0.65` |
-| `INQUIRY_MAX_ATTEMPTS` | no | Judged messages per sender before giving up, default `3` |
-| `INQUIRY_WINDOW_HOURS` | no | Screening window per sender, default `48` |
+| `INQUIRY_MAX_ATTEMPTS` | no | Judged messages per sender before giving up, default `5` |
+| `INQUIRY_WINDOW_HOURS` | no | Screening window per sender, default `168` (7 days) |
 | `INQUIRY_REOPEN_DAYS` | no | Re-open a rejected sender after N days, default `30` |
+| `INQUIRY_HISTORY_CHECK` | no | Check Evolution for existing messages before screening, default `true` |
 
 ## New-inquiry group (read-only card, discussion allowed)
 
@@ -78,6 +79,9 @@ forwarding flow.
 
 - Existing chats are seeded once from `/chat/findChats`, so old customers who
   were never saved to the phone book are not treated as new leads.
+- Before screening, Evolution is checked for any earlier message from **or to**
+  that person (both LID and phone JIDs). If a conversation already exists, the
+  sender is marked known and never enters the group.
 - Voice / image / file / video is skipped, and does not consume the sender: the
   next text message is still screened.
 - A greeting such as "Hi" does **not** lock the sender. Non-inquiries stay

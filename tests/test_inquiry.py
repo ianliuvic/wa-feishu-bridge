@@ -8,13 +8,13 @@ from app.evolution import EvolutionMessage
 from app.inquiry import InquiryNotifier
 
 
-def _message(text="", jid="15550001@s.whatsapp.net", push_name="Buyer", media=None):
+def _message(text="", jid="15550001@s.whatsapp.net", push_name="Buyer", media=None, alt="", mid=""):
     message = {"conversation": text} if media is None else {media: {}}
     return EvolutionMessage({
         "instance": "WA: test",
         "event": "messages.upsert",
         "data": {
-            "key": {"remoteJid": jid, "fromMe": False},
+            "key": {"remoteJid": jid, "remoteJidAlt": alt, "fromMe": False, "id": mid or "MSG1"},
             "pushName": push_name,
             "messageType": "conversation" if media is None else "media",
             "message": message,
@@ -47,11 +47,15 @@ def _false(reason="只是问候"):
 
 
 class FakeEvolution:
-    def __init__(self, chats):
+    def __init__(self, chats, history=False):
         self.chats = chats
+        self.history = history
 
     def find_chats(self, instance):
         return self.chats
+
+    def has_history(self, instance, jids, exclude_message_id=""):
+        return self.history
 
 
 class InquiryNotifierTests(unittest.TestCase):
@@ -112,6 +116,32 @@ class InquiryNotifierTests(unittest.TestCase):
         self.assertFalse(sent)
         post.assert_not_called()
 
+    def test_existing_history_is_marked_known(self):
+        self.evolution = FakeEvolution([], history=True)
+        with patch.object(self.notifier, "post") as post:
+            sent = self.notifier.screen(
+                _message("We need 500 pcs bikini"), self.llm, self.evolution
+            )
+            self.assertFalse(sent)
+            again = self.notifier.screen(
+                _message("more details"), self.llm, self.evolution
+            )
+            self.assertFalse(again)
+        post.assert_not_called()
+        state = self.notifier._row("15550001@s.whatsapp.net")
+        self.assertEqual(state["status"], "known")
+
+    def test_alt_jid_matches_seeded_chat(self):
+        self.evolution = FakeEvolution([{"remoteJid": "149529353576473@lid"}])
+        with patch.object(self.notifier, "post") as post:
+            sent = self.notifier.screen(
+                _message("500 pcs bikini", jid="61439950014@s.whatsapp.net",
+                         alt="149529353576473@lid"),
+                self.llm, self.evolution,
+            )
+        self.assertFalse(sent)
+        post.assert_not_called()
+
     def test_low_confidence_is_not_forwarded(self):
         self.llm = FakeLLM([{
             "is_inquiry": True, "confidence": 0.2, "reason": "vague",
@@ -140,10 +170,10 @@ class InquiryNotifierTests(unittest.TestCase):
         self.assertEqual(state["status"], "sent")
         self.assertEqual(state["attempts"], 1)
 
-    def test_three_non_inquiries_stop_screening(self):
-        self.llm = FakeLLM([_false(), _false(), _false()])
+    def test_five_non_inquiries_stop_screening(self):
+        self.llm = FakeLLM([_false(), _false(), _false(), _false(), _false()])
         with patch.object(self.notifier, "post") as post:
-            for text in ("Hi", "hello?", "how are you"):
+            for text in ("Hi", "hello?", "how are you", "you there", "ok"):
                 self.assertFalse(self.notifier.screen(_message(text), self.llm, self.evolution))
             # A later inquiry is ignored: the window is closed.
             self.llm = FakeLLM([_true()])
@@ -153,7 +183,7 @@ class InquiryNotifierTests(unittest.TestCase):
         post.assert_not_called()
         state = self.notifier._row("15550001@s.whatsapp.net")
         self.assertEqual(state["status"], "rejected")
-        self.assertEqual(state["attempts"], 3)
+        self.assertEqual(state["attempts"], 5)
 
     def test_media_does_not_consume_an_attempt(self):
         self.llm = FakeLLM([_true()])

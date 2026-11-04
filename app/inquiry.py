@@ -24,9 +24,12 @@ logger = logging.getLogger("bridge.inquiry")
 
 BEIJING = timezone(timedelta(hours=8))
 MAX_TEXT = 4000
-MAX_ATTEMPTS = max(1, int(os.getenv("INQUIRY_MAX_ATTEMPTS", "3")))
-WINDOW_HOURS = max(1, int(os.getenv("INQUIRY_WINDOW_HOURS", "48")))
+MAX_ATTEMPTS = max(1, int(os.getenv("INQUIRY_MAX_ATTEMPTS", "5")))
+WINDOW_HOURS = max(1, int(os.getenv("INQUIRY_WINDOW_HOURS", "168")))
 REOPEN_DAYS = max(1, int(os.getenv("INQUIRY_REOPEN_DAYS", "30")))
+HISTORY_CHECK = os.getenv("INQUIRY_HISTORY_CHECK", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 _SYSTEM = """你是红绣泳装（中国泳装/瑜伽服工厂）的询盘审核员。
 任务：判断一条 WhatsApp 消息是否是【真实的泳装采购询盘】——对方是买家，想向我们采购或委托生产泳装类产品。
@@ -132,6 +135,12 @@ class InquiryNotifier:
             )
             conn.execute("UPDATE seen SET last_message_at = first_seen WHERE last_message_at IS NULL")
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS aliases (jid TEXT PRIMARY KEY, canonical TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON aliases(canonical)"
+            )
             conn.commit()
             self._conn = conn
             return conn
@@ -161,12 +170,65 @@ class InquiryNotifier:
         keys = ("status", "attempts", "first_seen", "last_message_at", "seeded", "push_name")
         return dict(zip(keys, row))
 
+    def _lookup_locked(self, jids: list[str]):
+        conn = self._db()
+        for jid in jids:
+            row = conn.execute(
+                "SELECT canonical FROM aliases WHERE jid = ?", (jid,)
+            ).fetchone()
+            if row:
+                return row[0]
+        for jid in jids:
+            row = conn.execute("SELECT jid FROM seen WHERE jid = ?", (jid,)).fetchone()
+            if row:
+                return row[0]
+        return None
+
+    def _link_locked(self, jids: list[str], canonical: str) -> None:
+        conn = self._db()
+        for jid in jids:
+            conn.execute(
+                "INSERT OR REPLACE INTO aliases (jid, canonical) VALUES (?, ?)",
+                (jid, canonical),
+            )
+
+    def resolve(self, jids: list[str]):
+        with self._lock:
+            return self._lookup_locked(jids)
+
+    def create_pending(self, canonical: str, jids: list[str], push_name: str) -> None:
+        stamp = _now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            conn = self._db()
+            conn.execute(
+                "INSERT OR IGNORE INTO seen (jid, first_seen, push_name, seeded, verdict, reason, "
+                "status, attempts, last_message_at) VALUES (?, ?, ?, 0, NULL, '', 'pending', 0, ?)",
+                (canonical, stamp, push_name or "", stamp),
+            )
+            self._link_locked(jids, canonical)
+            conn.commit()
+
+    def mark_known(self, canonical: str, jids: list[str], push_name: str) -> None:
+        stamp = _now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            conn = self._db()
+            conn.execute(
+                "INSERT OR IGNORE INTO seen (jid, first_seen, push_name, seeded, verdict, reason, "
+                "status, attempts, last_message_at) VALUES (?, ?, ?, 1, NULL, '', 'known', 0, ?)",
+                (canonical, stamp, push_name or "", stamp),
+            )
+            conn.execute(
+                "UPDATE seen SET status = 'known', seeded = 1 WHERE jid = ?", (canonical,)
+            )
+            self._link_locked(jids, canonical)
+            conn.commit()
+
     def start_screening(self, jid: str, push_name: str) -> str:
         """Decide whether this message should go to the model.
 
-        Returns "judge", "known" (seeded contact), or "done" (already sent or
-        rejected until the reopen window). A pending sender is never locked by a
-        greeting: only a delivered card or the attempt/TTL cap ends screening.
+        Returns "judge", "known" (existing conversation), or "done" (already sent
+        or rejected until the reopen window). A pending sender is never locked by
+        a greeting: only a delivered card or the attempt/TTL cap ends screening.
         """
         now = _now()
         stamp = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -174,13 +236,7 @@ class InquiryNotifier:
             conn = self._db()
             row = self._row(jid)
             if row is None:
-                conn.execute(
-                    "INSERT INTO seen (jid, first_seen, push_name, seeded, verdict, reason, "
-                    "status, attempts, last_message_at) VALUES (?, ?, ?, 0, NULL, '', 'pending', 0, ?)",
-                    (jid, stamp, push_name or "", stamp),
-                )
-                conn.commit()
-                return "judge"
+                return "done"
             if row["seeded"]:
                 return "known"
             status = row["status"] or "pending"
@@ -273,6 +329,11 @@ class InquiryNotifier:
                         "status, attempts, last_message_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         rows,
                     )
+                    for row in rows:
+                        self._db().execute(
+                            "INSERT OR REPLACE INTO aliases (jid, canonical) VALUES (?, ?)",
+                            (row[0], row[0]),
+                        )
                     self._db().commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("inquiry seed write failed: %s", exc)
@@ -321,21 +382,41 @@ class InquiryNotifier:
             logger.warning("inquiry: chat history not seeded yet, skipping %s", evt.remote_jid)
             return False
 
-        jid = evt.remote_jid
-        with self._jid_lock(jid):
-            action = self.start_screening(jid, evt.push_name)
+        jids = evt.identity_jids or [evt.remote_jid]
+        canonical = evt.canonical_jid or evt.remote_jid
+        with self._jid_lock(canonical):
+            key = self.resolve(jids)
+            if key is None:
+                if HISTORY_CHECK and evolution is not None:
+                    try:
+                        has_history = evolution.has_history(
+                            evt.instance, jids, evt.message_id
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("inquiry: history check failed for %s: %s", canonical, exc)
+                        has_history = False
+                    if has_history:
+                        self.mark_known(canonical, jids, evt.push_name)
+                        logger.info(
+                            "inquiry: %s already has conversation history, marked known", canonical
+                        )
+                        return False
+                self.create_pending(canonical, jids, evt.push_name)
+                key = canonical
+
+            action = self.start_screening(key, evt.push_name)
             if action != "judge":
                 return False
 
             result, err = self.judge(llm, text, evt.push_name, evt.sender_phone)
             if err or result is None:
                 # Leave the sender pending: the next message gets another try.
-                logger.warning("inquiry: screening failed for %s: %s", jid, err)
+                logger.warning("inquiry: screening failed for %s: %s", key, err)
                 return False
 
             is_inquiry = bool(result["is_inquiry"]) and result["confidence"] >= self.min_confidence
             if not is_inquiry:
-                self.record_rejected(jid, result["reason"])
+                self.record_rejected(key, result["reason"])
                 logger.info(
                     "inquiry: not a lead %s confidence=%.2f reason=%s (kept for next message)",
                     evt.sender_phone, result["confidence"], result["reason"],
@@ -346,7 +427,7 @@ class InquiryNotifier:
             flat = self.build_card(evt, result["summary"], text, result["translation"], compact=True)
             if not self.post(card, flat):
                 return False
-            self.record_sent(jid, result["reason"])
+            self.record_sent(key, result["reason"])
             logger.info(
                 "inquiry: forwarded %s confidence=%.2f", evt.sender_phone, result["confidence"]
             )

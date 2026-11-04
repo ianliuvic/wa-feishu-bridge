@@ -22,9 +22,28 @@ class EvolutionMessage:
         key = data.get("key") or {}
         self.from_me = bool(key.get("fromMe", False))
         self.remote_jid = str(key.get("remoteJid") or "")
+        self.remote_jid_alt = str(key.get("remoteJidAlt") or "")
+        self.message_id = str(key.get("id") or "")
         self.push_name = str(data.get("pushName") or "")
         self.message = data.get("message") or {}
         self.message_type = str(data.get("messageType") or "")
+
+    @property
+    def identity_jids(self) -> list[str]:
+        """Both sides of a LID/phone pair, so history and state match the person."""
+        jids = [self.remote_jid, self.remote_jid_alt]
+        seen = []
+        for jid in jids:
+            if jid and jid not in seen:
+                seen.append(jid)
+        return seen
+
+    @property
+    def canonical_jid(self) -> str:
+        for jid in self.identity_jids:
+            if jid.endswith("@s.whatsapp.net"):
+                return jid
+        return self.remote_jid
 
     @property
     def sender_phone(self) -> str:
@@ -111,6 +130,37 @@ class EvolutionClient:
         """List the instance's chats, used once to seed the "known sender" table."""
         data = self._post(f"/chat/findChats/{quote(instance, safe='')}", {})
         return data if isinstance(data, list) else []
+
+    def find_messages(self, instance: str, jid: str, limit: int = 10, field: str = "remoteJid") -> dict:
+        data = self._post(
+            f"/chat/findMessages/{quote(instance, safe='')}",
+            {"where": {"key": {field: jid}}, "limit": limit},
+        )
+        return data.get("messages") or {}
+
+    def has_history(self, instance: str, jids: list[str], exclude_message_id: str = "") -> bool:
+        """True when the person has any earlier message, in either direction.
+
+        Evolution stores a LID chat under remoteJid=<lid> with
+        remoteJidAlt=<phone>, so both fields are queried. The message that
+        triggered this check may already be persisted at the moment the webhook
+        fires, hence the exclusion by message id.
+        """
+        for jid in jids:
+            for field in ("remoteJid", "remoteJidAlt"):
+                try:
+                    box = self.find_messages(instance, jid, limit=10, field=field)
+                except Exception:
+                    continue
+                records = box.get("records") or []
+                total = int(box.get("total") or 0)
+                for record in records:
+                    rid = str((record.get("key") or {}).get("id") or "")
+                    if rid and rid != exclude_message_id:
+                        return True
+                if total > len(records):
+                    return True
+        return False
 
     def fetch_instances(self) -> list[dict]:
         """List Evolution instances (used to find the open instance at startup)."""
