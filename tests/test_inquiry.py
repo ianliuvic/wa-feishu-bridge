@@ -15,6 +15,7 @@ def _message(text="", jid="15550001@s.whatsapp.net", push_name="Buyer", media=No
         "event": "messages.upsert",
         "data": {
             "key": {"remoteJid": jid, "remoteJidAlt": alt, "fromMe": False, "id": mid or "MSG1"},
+            "messageTimestamp": 1700000000,
             "pushName": push_name,
             "messageType": "conversation" if media is None else "media",
             "message": message,
@@ -54,7 +55,8 @@ class FakeEvolution:
     def find_chats(self, instance):
         return self.chats
 
-    def has_history(self, instance, jids, exclude_message_id=""):
+    def has_history(self, instance, jids, exclude_message_id="", before_timestamp=0):
+        self.last_history_args = (instance, jids, exclude_message_id, before_timestamp)
         return self.history
 
 
@@ -130,6 +132,7 @@ class InquiryNotifierTests(unittest.TestCase):
         post.assert_not_called()
         state = self.notifier._row("15550001@s.whatsapp.net")
         self.assertEqual(state["status"], "known")
+        self.assertEqual(self.evolution.last_history_args[3], 1700000000)
 
     def test_alt_jid_matches_seeded_chat(self):
         self.evolution = FakeEvolution([{"remoteJid": "149529353576473@lid"}])

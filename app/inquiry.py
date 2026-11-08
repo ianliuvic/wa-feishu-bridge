@@ -39,6 +39,8 @@ _SYSTEM = """你是红绣泳装（中国泳装/瑜伽服工厂）的询盘审核
 2. 明确表达买方意图：询价、要报价、要目录、打样、下单、OEM/ODM、贴牌、批发采购；
 3. 有具体诉求或可执行下一步（数量、款式、目标价、交期、MOQ 至少一项，或明确要求我们报价/发目录）。
 
+补充：这是红绣泳装公司的 WhatsApp 业务号，消息默认处于泳装业务语境。若消息是结构化报价请求（数量、private label/OEM、目标市场、交期、面料克重等），即使没有出现“泳装/泳衣”字样，也视为满足第 1 条。
+
 以下一律判 false：
 - 钓鱼/诈骗：要求投资、转账、索要银行账户/证件/验证码、承诺大单但先要费用、要求点击外部链接；
 - 推销：货代、面料辅料、包装、代运营、建站、SEO、广告、网红、招聘；
@@ -390,7 +392,7 @@ class InquiryNotifier:
                 if HISTORY_CHECK and evolution is not None:
                     try:
                         has_history = evolution.has_history(
-                            evt.instance, jids, evt.message_id
+                            evt.instance, jids, evt.message_id, evt.timestamp
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("inquiry: history check failed for %s: %s", canonical, exc)

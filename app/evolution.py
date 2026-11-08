@@ -27,6 +27,10 @@ class EvolutionMessage:
         self.push_name = str(data.get("pushName") or "")
         self.message = data.get("message") or {}
         self.message_type = str(data.get("messageType") or "")
+        try:
+            self.timestamp = int(data.get("messageTimestamp") or 0)
+        except (TypeError, ValueError):
+            self.timestamp = 0
 
     @property
     def identity_jids(self) -> list[str]:
@@ -138,13 +142,20 @@ class EvolutionClient:
         )
         return data.get("messages") or {}
 
-    def has_history(self, instance: str, jids: list[str], exclude_message_id: str = "") -> bool:
-        """True when the person has any earlier message, in either direction.
+    def has_history(
+        self,
+        instance: str,
+        jids: list[str],
+        exclude_message_id: str = "",
+        before_timestamp: int = 0,
+    ) -> bool:
+        """True when the person has an earlier message, in either direction.
 
         Evolution stores a LID chat under remoteJid=<lid> with
-        remoteJidAlt=<phone>, so both fields are queried. The message that
-        triggered this check may already be persisted at the moment the webhook
-        fires, hence the exclusion by message id.
+        remoteJidAlt=<phone>, so both fields are queried. Only messages strictly
+        older than `before_timestamp` count: the triggering message and anything
+        the bridge sent afterwards (notably the off-hours auto-reply) must not
+        make a brand-new sender look like an existing contact.
         """
         for jid in jids:
             for field in ("remoteJid", "remoteJidAlt"):
@@ -155,10 +166,17 @@ class EvolutionClient:
                 records = box.get("records") or []
                 total = int(box.get("total") or 0)
                 for record in records:
-                    rid = str((record.get("key") or {}).get("id") or "")
-                    if rid and rid != exclude_message_id:
+                    key = record.get("key") or {}
+                    rid = str(key.get("id") or "")
+                    if not rid or rid == exclude_message_id:
+                        continue
+                    try:
+                        ts = int(record.get("messageTimestamp") or 0)
+                    except (TypeError, ValueError):
+                        ts = 0
+                    if before_timestamp and ts and ts < before_timestamp:
                         return True
-                if total > len(records):
+                if total > len(records) and before_timestamp:
                     return True
         return False
 
