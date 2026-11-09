@@ -374,9 +374,8 @@ class InquiryNotifier:
             return False
         if evt.is_group:
             return False
-        # Voice / image / file / video as the first message: skipped by design.
-        if evt.media_type != "none":
-            return False
+        # Media without a caption produces "[非文字消息]" and falls through below;
+        # media with a caption is a normal text inquiry (image + question).
         text = (evt.text or "").strip()
         if not text or text == "[非文字消息]":
             return False

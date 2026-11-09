@@ -9,7 +9,10 @@ from app.inquiry import InquiryNotifier
 
 
 def _message(text="", jid="15550001@s.whatsapp.net", push_name="Buyer", media=None, alt="", mid=""):
-    message = {"conversation": text} if media is None else {media: {}}
+    if media is None:
+        message = {"conversation": text}
+    else:
+        message = {media: ({"caption": text} if text else {})}
     return EvolutionMessage({
         "instance": "WA: test",
         "event": "messages.upsert",
@@ -97,10 +100,10 @@ class InquiryNotifierTests(unittest.TestCase):
         self.assertFalse(sent)
         post.assert_not_called()
 
-    def test_media_first_message_is_skipped_but_not_consumed(self):
-        with patch.object(self.notifier, "post", return_value=True) as post:
+    def test_media_without_caption_is_skipped(self):
+        with patch.object(self.notifier, "post") as post:
             sent = self.notifier.screen(
-                _message("caption", media="imageMessage"), self.llm, self.evolution
+                _message("", media="imageMessage"), self.llm, self.evolution
             )
             self.assertFalse(sent)
             post.assert_not_called()
@@ -109,6 +112,15 @@ class InquiryNotifierTests(unittest.TestCase):
                 _message("Need 300 pcs swimwear, quote please"), self.llm, self.evolution
             )
         self.assertTrue(sent)
+
+    def test_image_with_caption_is_screened(self):
+        with patch.object(self.notifier, "post", return_value=True) as post:
+            sent = self.notifier.screen(
+                _message("Нужно 50 штук, сколько стоит?", media="imageMessage"),
+                self.llm, self.evolution,
+            )
+        self.assertTrue(sent)
+        post.assert_called_once()
 
     def test_group_message_is_ignored(self):
         with patch.object(self.notifier, "post") as post:
@@ -191,7 +203,7 @@ class InquiryNotifierTests(unittest.TestCase):
     def test_media_does_not_consume_an_attempt(self):
         self.llm = FakeLLM([_true()])
         with patch.object(self.notifier, "post", return_value=True):
-            self.notifier.screen(_message("caption", media="imageMessage"), self.llm, self.evolution)
+            self.notifier.screen(_message("", media="imageMessage"), self.llm, self.evolution)
             state = self.notifier._row("15550001@s.whatsapp.net")
             self.assertIsNone(state)
             self.assertTrue(

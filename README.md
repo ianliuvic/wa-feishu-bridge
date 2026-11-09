@@ -82,8 +82,9 @@ forwarding flow.
 - Before screening, Evolution is checked for any earlier message from **or to**
   that person (both LID and phone JIDs). If a conversation already exists, the
   sender is marked known and never enters the group.
-- Voice / image / file / video is skipped, and does not consume the sender: the
-  next text message is still screened.
+- Voice / image / file / video **without a caption** is skipped, and does not
+  consume the sender: the next text message is still screened. A media message
+  with a caption is treated as a text inquiry (image + "need 50 pcs, price?").
 - A greeting such as "Hi" does **not** lock the sender. Non-inquiries stay
   pending and the next message is judged, so "Hi" followed by a real inquiry is
   still caught.

@@ -65,6 +65,12 @@ class EvolutionMessage:
         ext = msg.get("extendedTextMessage") or {}
         if ext.get("text"):
             return str(ext["text"])
+        # Media messages carry their text as a caption; an image with a real
+        # question is still an inquiry and must reach the classifier.
+        for kind in ("imageMessage", "videoMessage", "documentMessage"):
+            caption = (msg.get(kind) or {}).get("caption")
+            if caption:
+                return str(caption)
         return "[非文字消息]"
 
     def format_for_feishu(self) -> str:
